@@ -7,9 +7,12 @@ staleness signal alongside Beads activity).
 Per architecture.md §5, a project whose GitHub signal is unreachable/unknown
 must fall back to Beads activity alone rather than blocking evaluation --
 this client is what makes that fallback possible, so every failure mode
-(404, 403, network error, malformed response) resolves to `None` rather than
-raising. "No remote configured" is a caller-side concern: a project with no
-GitHub remote URL simply never calls this client.
+(404, 403, network/transport error) resolves to `None` rather than raising.
+"No remote configured" is a caller-side concern: a project with no GitHub
+remote URL simply never calls this client. A malformed 200 response (an
+unexpected body shape) is not handled specially and will raise -- GitHub's
+documented API contract doesn't produce that shape, so it's treated as a
+genuine bug surface rather than an expected "signal unavailable" outcome.
 
 Both lookups are cached per `(owner, repo)`, independently, for
 `check_ttl_minutes` (from `config.github.check_ttl_minutes`) -- this is the
