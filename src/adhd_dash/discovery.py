@@ -61,17 +61,44 @@ def discover_projects(root: Path) -> list[ProjectRef]:
     return sorted(results, key=lambda ref: ref.path)
 
 
-def _walk(directory: Path, results: list[ProjectRef]) -> None:
+def detect_project(directory: Path) -> ProjectRef | None:
+    """Check whether `directory` itself (not its subtree) is a project.
+
+    `.beads` takes precedence when both `.beads` and `.git` are present. A
+    plain `.git` entry (directory or file, no `.beads`) yields
+    `beads_initialized=False`. Neither present, or an `OSError` while
+    stat-ing `.beads`/`.git` (e.g. an unreadable directory) -> `None`.
+
+    NOTE for `_walk` callers: `None` here means "this directory itself isn't
+    a confirmed match" -- it does NOT mean "give up on this subtree." `_walk`
+    still attempts `iterdir()` on the same directory afterwards; if THAT
+    succeeds (a real, if unusual, permission combination -- e.g. execute
+    without read on the parent can make named-child lookups fail while
+    directory listing still works), recursion continues and nested projects
+    are still found. This is an intentional refinement over `_walk`'s
+    pre-extraction behavior (which stopped recursing entirely the moment the
+    `.beads`/`.git` check failed) -- verified against `adhd-dash-c6f.2`'s
+    original code: a genuinely findable nested project could previously be
+    silently lost this way. See `test_discovery.py`'s
+    `test_unreadable_for_detection_but_listable_directory_still_finds_nested_projects`.
+    """
     try:
         has_beads = (directory / ".beads").is_dir()
         has_git = (directory / ".git").exists()
     except OSError:
-        return
+        return None
 
     if has_beads:
-        results.append(ProjectRef(path=str(directory), beads_initialized=True))
-    elif has_git:
-        results.append(ProjectRef(path=str(directory), beads_initialized=False))
+        return ProjectRef(path=str(directory), beads_initialized=True)
+    if has_git:
+        return ProjectRef(path=str(directory), beads_initialized=False)
+    return None
+
+
+def _walk(directory: Path, results: list[ProjectRef]) -> None:
+    ref = detect_project(directory)
+    if ref is not None:
+        results.append(ref)
 
     try:
         children = list(directory.iterdir())

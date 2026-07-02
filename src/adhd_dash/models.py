@@ -12,6 +12,7 @@ them now would be scope creep for the config/state foundations issue.
 
 from datetime import UTC, datetime
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -20,7 +21,18 @@ def _utcnow() -> datetime:
 
 
 class TrackedProject(SQLModel, table=True):
-    """A project tracked by the dashboard, identified by (host, path)."""
+    """A project tracked by the dashboard, identified by (host, path).
+
+    NOTE: the `UniqueConstraint` below (adhd-dash-70d) is applied by
+    `SQLModel.metadata.create_all()` (via `db.init_db`) only when the
+    `trackedproject` table is created fresh -- it does NOT retroactively
+    `ALTER TABLE` an already-existing SQLite file to add the constraint.
+    There's no migration framework in this project yet, and no real
+    `state.db` exists in production as of this writing, so this is fine --
+    just don't assume this silently retrofits an existing on-disk table.
+    """
+
+    __table_args__ = (UniqueConstraint("host", "path"),)
 
     id: int | None = Field(default=None, primary_key=True)
     host: str
