@@ -66,9 +66,21 @@ def detect_project(directory: Path) -> ProjectRef | None:
 
     `.beads` takes precedence when both `.beads` and `.git` are present. A
     plain `.git` entry (directory or file, no `.beads`) yields
-    `beads_initialized=False`. Neither present -> `None`. An `OSError` while
-    stat-ing `.beads`/`.git` (e.g. an unreadable parent) is treated the same
-    way as `_walk`'s existing handling: `None`, not a fatal error.
+    `beads_initialized=False`. Neither present, or an `OSError` while
+    stat-ing `.beads`/`.git` (e.g. an unreadable directory) -> `None`.
+
+    NOTE for `_walk` callers: `None` here means "this directory itself isn't
+    a confirmed match" -- it does NOT mean "give up on this subtree." `_walk`
+    still attempts `iterdir()` on the same directory afterwards; if THAT
+    succeeds (a real, if unusual, permission combination -- e.g. execute
+    without read on the parent can make named-child lookups fail while
+    directory listing still works), recursion continues and nested projects
+    are still found. This is an intentional refinement over `_walk`'s
+    pre-extraction behavior (which stopped recursing entirely the moment the
+    `.beads`/`.git` check failed) -- verified against `adhd-dash-c6f.2`'s
+    original code: a genuinely findable nested project could previously be
+    silently lost this way. See `test_discovery.py`'s
+    `test_unreadable_for_detection_but_listable_directory_still_finds_nested_projects`.
     """
     try:
         has_beads = (directory / ".beads").is_dir()

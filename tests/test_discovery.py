@@ -157,6 +157,42 @@ def test_project_dir_still_matched_even_if_its_own_contents_unlistable(
     assert refs == [ProjectRef(path=str(project), beads_initialized=True)]
 
 
+def test_unreadable_for_detection_but_listable_directory_still_finds_nested_projects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory whose own `.beads`/`.git` stat fails (OSError) does NOT
+    stop the scan from still trying to list and recurse into its children --
+    only a failing `iterdir()` does that. This is an intentional refinement
+    made when `detect_project` was extracted from `_walk` (adhd-dash-c6f.3):
+    the pre-extraction code stopped recursing entirely the moment the
+    `.beads`/`.git` check failed, silently losing genuinely findable nested
+    projects. Locking in the current, more permissive behavior with a test
+    so a future change can't silently regress it either way."""
+    locked = tmp_path / "locked"
+    inner_project = locked / "inner-project"
+    (inner_project / ".beads").mkdir(parents=True)
+
+    original_is_dir = Path.is_dir
+    original_exists = Path.exists
+
+    def fake_is_dir(self: Path) -> bool:
+        if self == locked / ".beads":
+            raise PermissionError(f"Permission denied: {self}")
+        return original_is_dir(self)
+
+    def fake_exists(self: Path) -> bool:
+        if self == locked / ".git":
+            raise PermissionError(f"Permission denied: {self}")
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    refs = discover_projects(tmp_path)
+
+    assert refs == [ProjectRef(path=str(inner_project), beads_initialized=True)]
+
+
 def test_does_not_descend_into_git_internals(tmp_path: Path) -> None:
     """`.git` directories can contain arbitrarily deep subdirectories --
     something inside `.git/` that would itself look like a `.beads` dir (or
