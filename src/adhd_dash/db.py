@@ -12,6 +12,12 @@ from pathlib import Path
 from sqlalchemy import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
+# SQLModel.metadata only knows about table classes that have actually been
+# imported somewhere in the process -- without this import, a caller that
+# never separately imports adhd_dash.models (e.g. main.py's lifespan) would
+# have init_db() silently create zero tables.
+from adhd_dash import models as _models  # noqa: F401
+
 DEFAULT_DB_PATH = "state.db"
 
 
