@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from adhd_dash.db import create_db_engine, init_db
@@ -91,3 +92,18 @@ def test_snooze_and_last_seen_persist(engine: Engine) -> None:
         assert fetched is not None
         assert fetched.snoozed_until == snoozed_until
         assert fetched.last_seen_at == last_seen_at
+
+
+def test_duplicate_host_path_violates_unique_constraint(engine: Engine) -> None:
+    """adhd-dash-70d: (host, path) must be unique at the DB level -- a
+    second row with the same pair is rejected even when inserted directly
+    via a Session, independent of any application-level get-or-create
+    logic."""
+    with Session(engine) as session:
+        session.add(TrackedProject(host="example-host", path="/srv/projects/dup"))
+        session.commit()
+
+    with Session(engine) as session:
+        session.add(TrackedProject(host="example-host", path="/srv/projects/dup"))
+        with pytest.raises(IntegrityError):
+            session.commit()
