@@ -46,6 +46,15 @@ def discover_projects(root: Path) -> list[ProjectRef]:
     own `.git`/`.beads` entries, which are metadata, not candidate
     subdirectories). Symlinks are not followed, to avoid cycles. Results are
     sorted by `path` for deterministic test output.
+
+    An unreadable subdirectory (`PermissionError`/`OSError` -- real home and
+    dev directory trees routinely contain a few, e.g. restricted caches or
+    other-user directories) is skipped, not fatal: this is an expected,
+    routine absence for a broad recursive scan, the same way `GithubClient`
+    treats a 404 as "no data" rather than a bug (see `github_client.py`'s
+    module docstring) -- not the "real misconfiguration" class of failure
+    `BdAdapter`/`BrAdapter` raise on. Everything else already found,
+    including inside the unreadable subtree's siblings, is still returned.
     """
     results: list[ProjectRef] = []
     _walk(root, results)
@@ -53,15 +62,26 @@ def discover_projects(root: Path) -> list[ProjectRef]:
 
 
 def _walk(directory: Path, results: list[ProjectRef]) -> None:
-    has_beads = (directory / ".beads").is_dir()
-    has_git = (directory / ".git").exists()
+    try:
+        has_beads = (directory / ".beads").is_dir()
+        has_git = (directory / ".git").exists()
+    except OSError:
+        return
 
     if has_beads:
         results.append(ProjectRef(path=str(directory), beads_initialized=True))
     elif has_git:
         results.append(ProjectRef(path=str(directory), beads_initialized=False))
 
-    for child in directory.iterdir():
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        # Directory is a confirmed match (or not) above, but its contents
+        # aren't listable (e.g. execute-but-not-read permission) -- the
+        # match already recorded still stands, we just can't recurse further.
+        return
+
+    for child in children:
         if not child.is_dir() or child.is_symlink():
             continue
         if child.name in _METADATA_DIR_NAMES:
