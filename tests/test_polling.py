@@ -1,6 +1,7 @@
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 import time_machine
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
@@ -17,6 +18,7 @@ from adhd_dash.db import create_db_engine, init_db
 from adhd_dash.main import build_scheduler
 from adhd_dash.models import TrackedProject
 from adhd_dash.polling import poll
+from adhd_dash.projects import get_or_create_project as real_get_or_create_project
 
 
 def _make_config(roots: list[str], interval_minutes: int = 60) -> Config:
@@ -165,6 +167,67 @@ def test_poll_reconciles_with_resolved_path_when_root_is_a_symlink(tmp_path: Pat
     assert rows[0].last_seen_at is not None
 
 
+def test_poll_commits_progress_incrementally_not_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`poll()` must commit per-project (adhd-dash-v28), not once for the
+    whole multi-root pass -- otherwise a mid-pass failure on one project
+    rolls back the whole shared transaction, discarding `last_seen_at`
+    stamps already set for earlier, unrelated projects in the same pass.
+
+    Two roots (list order is deterministic, unlike filesystem-walk order
+    within a single root) each hold one project. `get_or_create_project` is
+    monkeypatched to call through unchanged for project A but raise for
+    project B, simulating a mid-pass failure. `get_or_create_project`
+    itself already commits when it *creates* a row, so project A's row
+    exists under both the old and new code -- the fix only changes whether
+    project A's *`last_seen_at` stamp* (set by `poll()` itself, after
+    `get_or_create_project` returns) survives project B's later failure:
+    under the old single-commit-at-the-end code, that stamp is still
+    pending when the exception unwinds out of the `with Session(...)`
+    block, so it gets rolled back; under the fix, it was already committed
+    before project B was even attempted.
+    """
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    project_a = root_a / "project-a"
+    project_b = root_b / "project-b"
+    (project_a / ".beads").mkdir(parents=True)
+    (project_b / ".beads").mkdir(parents=True)
+    resolved_a = str(project_a.resolve())
+    resolved_b = str(project_b.resolve())
+
+    config = _make_config([str(root_a), str(root_b)])
+    engine = create_db_engine(tmp_path / "state.db")
+    init_db(engine)
+
+    def fake_get_or_create_project(
+        session: Session, host: str, path: str
+    ) -> tuple[TrackedProject, bool]:
+        if path == resolved_b:
+            raise RuntimeError("simulated mid-pass failure for project B")
+        return real_get_or_create_project(session, host, path)
+
+    monkeypatch.setattr("adhd_dash.polling.get_or_create_project", fake_get_or_create_project)
+
+    with pytest.raises(RuntimeError, match="simulated mid-pass failure"):
+        poll(config, engine)
+
+    with Session(engine) as session:
+        row_a = session.exec(
+            select(TrackedProject).where(TrackedProject.path == resolved_a)
+        ).one_or_none()
+        row_b = session.exec(
+            select(TrackedProject).where(TrackedProject.path == resolved_b)
+        ).one_or_none()
+
+    assert row_a is not None
+    assert row_a.last_seen_at is not None
+    assert row_b is None
+
+
 def test_build_scheduler_registers_poll_job_with_configured_interval(tmp_path: Path) -> None:
     config = _make_config(roots=[], interval_minutes=15)
     engine = create_db_engine(tmp_path / "state.db")
@@ -177,3 +240,19 @@ def test_build_scheduler_registers_poll_job_with_configured_interval(tmp_path: P
     assert job.id == "poll"
     assert isinstance(job.trigger, IntervalTrigger)
     assert job.trigger.interval == timedelta(minutes=15)
+
+
+def test_build_scheduler_registers_poll_job_with_max_instances_one(tmp_path: Path) -> None:
+    """`max_instances=1` (adhd-dash-v28) prevents two SCHEDULED poll passes
+    from ever overlapping each other if one pass runs longer than the
+    configured interval. It does not, by itself, protect against a
+    scheduled poll overlapping `POST /api/v1/refresh`'s direct `poll()`
+    call -- see that route's docstring for why that race is instead
+    accepted and bounded rather than prevented."""
+    config = _make_config(roots=[], interval_minutes=15)
+    engine = create_db_engine(tmp_path / "state.db")
+
+    scheduler = build_scheduler(config, engine)
+
+    job = scheduler.get_jobs()[0]
+    assert job.max_instances == 1
