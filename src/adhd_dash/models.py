@@ -40,5 +40,18 @@ class TrackedProject(SQLModel, table=True):
     archived: bool = False
     archived_at: datetime | None = None
     snoozed_until: datetime | None = None
+    # None means "never confirmed present by a poll pass" -- for a project
+    # manually added via POST /api/v1/projects (PRD R3, adhd-dash-c6f.3),
+    # that is expected and permanent, not "not yet polled": manual-add
+    # exists precisely so a project outside every configured
+    # `HostConfig.roots` can be tracked, and `poll()` (adhd_dash.polling)
+    # only stamps rows it discovers by walking those configured roots, so
+    # such a row is structurally unreachable by any future poll. This is
+    # currently safe because nothing in this codebase reads `last_seen_at`
+    # for any decision (see docs/architecture.md §6). Whichever consumer
+    # eventually reads it first -- e.g. the staleness-detection epic
+    # (adhd-dash-oui) -- must explicitly decide how to treat
+    # "manually-added, never polled" rather than assuming None always means
+    # stale or always means fine.
     last_seen_at: datetime | None = None
     created_at: datetime = Field(default_factory=_utcnow)
