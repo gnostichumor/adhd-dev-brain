@@ -3,8 +3,16 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine
 from sqlmodel import Session, select
 
+from adhd_dash.config import (
+    Config,
+    GithubConfig,
+    LoggingConfig,
+    PollingConfig,
+    StalenessConfig,
+)
 from adhd_dash.db import create_db_engine, get_db_session, init_db
 from adhd_dash.main import app
 from adhd_dash.models import TrackedProject
@@ -13,7 +21,7 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def override_db_session(tmp_path: Path) -> Generator[None, None, None]:
+def override_db_session(tmp_path: Path) -> Generator[Engine, None, None]:
     """Replace get_db_session with one backed by an isolated tmp_path engine.
 
     `app` is a module-level singleton shared across the whole test suite
@@ -22,6 +30,11 @@ def override_db_session(tmp_path: Path) -> Generator[None, None, None]:
     same `app`. Lifespan is never triggered here (plain TestClient(app), no
     `with`), so this is the only way app.state.db_engine would ever be set
     for these tests -- and we bypass it entirely via dependency_overrides.
+
+    Yields the engine itself (not just None) so other fixtures/tests that
+    need `POST /api/v1/refresh` to see the same rows (that route reads
+    `request.app.state.db_engine` directly, not the dependency-injected
+    session) can reuse it instead of standing up a second, disconnected one.
     """
     engine = create_db_engine(tmp_path / "test-state.db")
     init_db(engine)
@@ -31,8 +44,32 @@ def override_db_session(tmp_path: Path) -> Generator[None, None, None]:
             yield session
 
     app.dependency_overrides[get_db_session] = _get_test_session
-    yield
+    yield engine
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def app_state_for_refresh(override_db_session: Engine) -> Generator[None, None, None]:
+    """Set `app.state.config`/`app.state.db_engine` for `POST /api/v1/refresh`.
+
+    That route reads config/engine directly off `app.state` (mirroring how
+    `main.py`'s `lifespan` sets them), which plain `TestClient(app)` never
+    populates since lifespan doesn't run. Bound to the same engine
+    `override_db_session` already set up, and cleaned up afterward so it
+    doesn't leak into other tests sharing the same `app` singleton.
+    """
+    config = Config(
+        staleness=StalenessConfig(default_threshold_days=14),
+        polling=PollingConfig(interval_minutes=60),
+        hosts=[],
+        github=GithubConfig(check_ttl_minutes=60, token=""),
+        logging=LoggingConfig(level="INFO"),
+    )
+    app.state.config = config
+    app.state.db_engine = override_db_session
+    yield
+    del app.state.config
+    del app.state.db_engine
 
 
 def _make_project_dir(tmp_path: Path, name: str = "my-project", marker: str = ".beads") -> Path:
@@ -127,6 +164,29 @@ def test_add_project_path_without_beads_or_git_returns_400(tmp_path: Path) -> No
 
     assert response.status_code == 400
     assert "detail" in response.json()
+
+
+def test_refresh_triggers_poll_using_shared_db_engine(
+    tmp_path: Path, app_state_for_refresh: None
+) -> None:
+    """`POST /api/v1/refresh` runs a poll pass against the same DB engine
+    the rest of the test suite uses (via `override_db_session`), not a
+    disconnected one -- and with an empty `hosts` config (the simplest valid
+    case), the poll pass finds nothing to do, so a pre-existing row is left
+    exactly as-is: not duplicated, not removed."""
+    project_dir = _make_project_dir(tmp_path)
+    add_response = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir)})
+    assert add_response.status_code == 201
+
+    refresh_response = client.post("/api/v1/refresh")
+
+    assert refresh_response.status_code == 202
+    assert refresh_response.json() == {"status": "polled"}
+
+    engine = app.state.db_engine
+    with Session(engine) as session:
+        rows = session.exec(select(TrackedProject).where(TrackedProject.host == "local")).all()
+    assert len(rows) == 1
 
 
 def test_add_project_unreadable_path_returns_400_not_500(

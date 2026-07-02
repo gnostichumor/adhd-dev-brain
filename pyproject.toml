@@ -45,6 +45,13 @@ strict = true
 python_version = "3.12"
 files = ["src"]
 
+# apscheduler==3.11.3 ships no py.typed marker and no types-apscheduler stub
+# package exists (checked: not on PyPI) -- ignore-missing-imports is the
+# correct escape hatch here, not a workaround for our own code.
+[[tool.mypy.overrides]]
+module = "apscheduler.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

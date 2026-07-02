@@ -1,22 +1,23 @@
 """v1 API routes.
 
-Only a health check and the manual add-project route exist here by design --
-config/state, Beads adapters, the GitHub client, and staleness evaluation
-each own their own routes and land as those subsystems are implemented, not
-bundled in here ahead of time.
+Only a health check, the manual add-project route, and a manual refresh
+trigger (adhd-dash-c6f.4) exist here by design -- Beads adapters, the GitHub
+client, and staleness evaluation each own their own routes and land as those
+subsystems are implemented, not bundled in here ahead of time.
 """
 
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from adhd_dash.db import get_db_session
 from adhd_dash.discovery import detect_project
 from adhd_dash.models import TrackedProject
+from adhd_dash.polling import poll
+from adhd_dash.projects import get_or_create_project
 
 router = APIRouter(prefix="/api/v1")
 
@@ -41,12 +42,6 @@ class TrackedProjectResponse(BaseModel):
     host: str
     path: str
     created_at: datetime
-
-
-def _select_project(session: Session, host: str, path: str) -> TrackedProject | None:
-    return session.exec(
-        select(TrackedProject).where(TrackedProject.host == host, TrackedProject.path == path)
-    ).first()
 
 
 @router.post("/projects", response_model=TrackedProjectResponse)
@@ -108,27 +103,20 @@ def add_project(
     # differ).
     resolved_path = str(directory.resolve())
 
-    existing = _select_project(session, body.host, resolved_path)
-    if existing is not None:
-        response.status_code = status.HTTP_200_OK
-        return existing
-
-    project = TrackedProject(host=body.host, path=resolved_path)
-    session.add(project)
-    try:
-        session.commit()
-    except IntegrityError:
-        session.rollback()
-        existing = _select_project(session, body.host, resolved_path)
-        if existing is None:
-            # The insert failed with a uniqueness conflict, but the row it
-            # conflicted with isn't found on re-query -- something other
-            # than the (host, path) race we're guarding against. Surface it
-            # rather than silently pretending success.
-            raise
-        response.status_code = status.HTTP_200_OK
-        return existing
-
-    session.refresh(project)
-    response.status_code = status.HTTP_201_CREATED
+    project, created = get_or_create_project(session, body.host, resolved_path)
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return project
+
+
+@router.post("/refresh", status_code=status.HTTP_202_ACCEPTED)
+def refresh(request: Request) -> dict[str, str]:
+    """Manually trigger a poll pass out-of-band (PRD R4).
+
+    Runs the same discovery + last-seen refresh pass as the scheduled job
+    (`adhd_dash.polling.poll`), synchronously, so a caller can force an
+    immediate refresh instead of waiting for the next scheduled interval.
+    See `poll`'s docstring for what this pass does and does not do (in
+    particular: no Beads/GitHub status ingestion yet).
+    """
+    poll(request.app.state.config, request.app.state.db_engine)
+    return {"status": "polled"}
