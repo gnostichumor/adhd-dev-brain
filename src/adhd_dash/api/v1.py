@@ -6,11 +6,14 @@ client, and staleness evaluation each own their own routes and land as those
 subsystems are implemented, not bundled in here ahead of time.
 """
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlmodel import Session
 
 from adhd_dash.db import get_db_session
@@ -108,8 +111,8 @@ def add_project(
     return project
 
 
-@router.post("/refresh", status_code=status.HTTP_202_ACCEPTED)
-def refresh(request: Request) -> dict[str, str]:
+@router.post("/refresh", status_code=status.HTTP_202_ACCEPTED, response_model=None)
+def refresh(request: Request) -> dict[str, str] | JSONResponse:
     """Manually trigger a poll pass out-of-band (PRD R4).
 
     Runs the same discovery + last-seen refresh pass as the scheduled job
@@ -117,6 +120,32 @@ def refresh(request: Request) -> dict[str, str]:
     immediate refresh instead of waiting for the next scheduled interval.
     See `poll`'s docstring for what this pass does and does not do (in
     particular: no Beads/GitHub status ingestion yet).
+
+    This call can race a concurrently-running SCHEDULED poll (adhd-dash-v28):
+    `build_scheduler`'s `max_instances=1` only prevents two scheduled polls
+    from overlapping each other, not a scheduled poll overlapping this
+    route's direct call to `poll()`. That race is accepted, not actively
+    prevented -- over-engineering a cross-process lock for a
+    single-operator home-lab tool isn't worth it when the damage is already
+    bounded: `create_db_engine`'s SQLite busy-timeout lets a concurrent
+    writer wait briefly rather than fail immediately, and `poll()` now
+    commits per-project (not once for the whole pass), so a genuine
+    conflict can only cost the one project involved, not the whole pass. If
+    the busy-timeout is exceeded anyway, SQLite raises "database is locked"
+    -- surfaced here as `sqlite3.OperationalError` directly, or as
+    SQLAlchemy's wrapped `OperationalError` (whose `.orig` is the same
+    underlying `sqlite3.OperationalError`) when it happens inside a
+    `Session` commit -- and turned into a 503 below instead of an unhandled
+    500.
     """
-    poll(request.app.state.config, request.app.state.db_engine)
+    try:
+        poll(request.app.state.config, request.app.state.db_engine)
+    except (sqlite3.OperationalError, SQLAlchemyOperationalError):
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "busy",
+                "detail": "database is busy (likely a concurrent poll) -- try again shortly",
+            },
+        )
     return {"status": "polled"}
