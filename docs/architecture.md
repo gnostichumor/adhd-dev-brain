@@ -15,9 +15,81 @@
 | Local datastore | SQLite (`state.db`), single file, via SQLModel | Same single-file-bind pattern as `open-delete`'s `state.db` |
 | Scheduler | APScheduler (AsyncIO), interval read from config | In-process, no extra infra; satisfies PRD R4 polling cadence |
 | Remote access | `asyncssh` | Discovery (`find … -name .beads`) and status reads on Tailscale-reachable hosts |
-| Beads ingestion | Adapter pair: `BdAdapter` (gastownhall `bd`, confirmed `bd status --json` schema) + `BrAdapter` (Dicklesworthstone `br`, schema TBD — confirm against a live install before implementing) | Tracked projects use a mix of both CLIs |
+| Beads ingestion | Adapter pair: `BdAdapter` (gastownhall `bd`, confirmed `bd status --json` schema) + `BrAdapter` (Dicklesworthstone `br`, schema confirmed against a live v0.2.15 install — see §1a) | Tracked projects use a mix of both CLIs |
 | GitHub activity | `httpx` against GitHub REST API — Releases (PRD R6) and commit/push timestamps (PRD R17) | Same client, two uses: release detection and staleness signal |
 | Packaging | Dockerfile (`python:3.12-slim`), GHCR-published pinned image (primary), local build on the `docker` LXC (fast-iteration fallback) | Mirrors `open-delete`'s two documented build paths |
+
+## 1a. `br` JSON schema (confirmed)
+
+Verified against a live `br` v0.2.15 install with 67 real issues (mixed
+open/closed, some with dependency chains), corroborated with `br schema issue
+--format json` (br's own self-described contract). `br schema` is explicitly
+non-stable API ("subject to change" per `br schema --help`), so treat this as
+a snapshot pinned to v0.2.15, not a permanent guarantee — re-verify on `br`
+upgrades.
+
+**Fields that map 1:1 to `bd`'s schema (same names, same apparent meaning):**
+`id`, `title`, `description`, `acceptance_criteria`, `status`, `priority`,
+`issue_type`, `owner`, `assignee`, `created_at`, `created_by`, `updated_at`,
+`closed_at`, `close_reason`, `labels`. `owner`/`assignee` were both present
+as distinct fields in the schema, matching `bd`'s two-concept model — but
+both were `null` in every sampled issue (no fleet/multi-agent usage in this
+project), so their real-world value convention is unconfirmed.
+
+**Enum differences (`BrAdapter` needs an explicit mapping decision):**
+- `status`: `br` has 8 values — `open`, `in_progress`, `blocked`,
+  `deferred`, `draft`, `closed`, `tombstone`, `pinned` — vs `bd`'s 3
+  (`open`, `in_progress`, `closed`). `blocked`, `deferred`, `draft`,
+  `tombstone`, and `pinned` have no `bd` equivalent; `BrAdapter` must decide
+  how each folds into `ProjectStatus`'s staleness/percent-complete model
+  (e.g. does `blocked` count as "not stale" the way `in_progress` does?).
+- `issue_type`: `br` adds `docs` and `question` on top of the `epic`,
+  `feature`, `task`, `chore`, `bug` set `bd` uses.
+- `priority`: `br` documents `0=Critical … 4=Backlog` (int) in its schema.
+  `bd`'s priority is also an int in observed output, but its own 0–4
+  convention hasn't been independently confirmed in this project's `bd`
+  usage — assume parity, confirm separately if `BrAdapter` needs to compare
+  priorities across CLIs.
+
+**`bd` fields `br` has no equivalent of:**
+- `started_at` — no such field in `br`'s `Issue` schema. `BrAdapter` should
+  default this to `None`, or (lower priority) derive it from the issue's
+  `events` array on `show` output if a status-transition-to-`in_progress`
+  event is ever needed.
+- `comment_count` — `br` has no scalar count; it exposes a `comments` array
+  (present on `show`/issue-details output, omitted entirely when empty).
+  `BrAdapter` should default to `0` when the key is absent, else `len(comments)`.
+
+**`br`-only fields with no `bd` equivalent:** `design`, `notes`,
+`estimated_minutes`, `closed_by_session`, `due_at`, `defer_until`,
+`external_ref`, `source_system`, `source_repo`, `source_repo_path`,
+`agent_context`, `deleted_at`/`deleted_by`/`delete_reason` (tombstone
+soft-delete metadata), `compaction_level`/`compacted_at`/`original_size`,
+`ephemeral`, `pinned`, `is_template`. None of these have an obvious
+`ProjectStatus` field to map to; `BrAdapter` can ignore them for v1. Full
+list: `br schema issue --format json`.
+
+**Gotchas for `BrAdapter` implementation (found empirically, not just from
+the schema export):**
+- **Absent fields are omitted from the JSON entirely on `null`/empty, not
+  emitted as `"field": null`.** E.g. an open issue with no assignee has no
+  `assignee` key at all. `BrAdapter` must default-on-missing-key, not assume
+  every schema field is always present.
+- **`br show <id> --json` returns a JSON array (`[{...}]`), even for a
+  single ID** — the command accepts multiple IDs positionally. `bd show`
+  (per this project's existing usage) returns a bare object. `BrAdapter`
+  must unwrap `[0]`.
+- **Dependency shape differs by command.** `br list --json` rows carry
+  integer `dependency_count`/`dependent_count` (matching `bd`'s convention).
+  `br show --json` (issue-details) instead carries full `dependencies`/
+  `dependents` arrays of `{id, title, status, priority, dependency_type}`
+  objects — no integer count field there. `BrAdapter` needs to read counts
+  from `list` and, if it ever consumes `show`, derive counts via array
+  length instead.
+- **A `br`-managed project's issue-ID prefix is configurable and is not a
+  reliable signal of which CLI (`bd` vs `br`) manages it** — a `br` project
+  can use a `bd-`-style prefix. Adapter selection must be based on which
+  binary/config is present, never inferred from ID string shape.
 
 ## 2. Deployment
 
