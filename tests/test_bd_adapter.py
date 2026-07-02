@@ -1,9 +1,12 @@
 import json
+import shlex
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from adhd_dash.adapters.bd_adapter import BdAdapter, CommandRunner
+from adhd_dash.adapters.bd_adapter import BdAdapter, CommandRunner, _build_remote_command
 from adhd_dash.config import HostConfig
 
 # Captured verbatim from a live `bd` install against this repo's own
@@ -61,6 +64,28 @@ STATUS_JSON_EMPTY = {
 }
 
 LIST_JSON_EMPTY: list[dict[str, object]] = []
+
+
+# --- _build_remote_command: shell-injection safety --------------------------
+
+
+def test_build_remote_command_round_trips_via_shlex() -> None:
+    command = _build_remote_command(["bd", "status", "--json"], "/srv/projects/my project")
+
+    assert shlex.split(command) == ["bd", "status", "--json", "-C", "/srv/projects/my project"]
+
+
+def test_build_remote_command_prevents_shell_injection(tmp_path: Path) -> None:
+    """An unquoted path with a shell separator would run a second command
+    when handed to asyncssh's conn.run(str) -- this is the exact class of
+    bug fixed in this PR's own history (see git log on this file)."""
+    marker = tmp_path / "should_not_exist"
+    malicious_path = f"/srv/projects/foo; touch {marker}"
+
+    command = _build_remote_command(["true"], malicious_path)
+    subprocess.run(["sh", "-c", command], check=True)
+
+    assert not marker.exists()
 
 
 def make_runner(status_json: object, list_json: object) -> CommandRunner:

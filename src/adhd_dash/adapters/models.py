@@ -24,8 +24,15 @@ class ProjectStatus(BaseModel):
     completion percentage (PRD R18), not a 0% one.
 
     `last_beads_activity_at` is `None` only when the project has zero
-    issues; otherwise it is timezone-aware (UTC), since bd/br both emit
-    `Z`-suffixed ISO8601 timestamps.
+    issues; otherwise it is timezone-aware (UTC) when populated by
+    `BdAdapter` -- `bd`'s `Z`-suffixed ISO8601 timestamps are confirmed
+    against a live install (see `BdAdapter.get_status`). `br`'s timestamp
+    *string format* has NOT been verified the same way: docs/architecture.md
+    §1a confirms `bd`/`br` share field names (`updated_at`, etc.) but never
+    samples `br`'s actual timestamp format -- BrAdapter (adhd-dash-8d2.4)
+    must confirm this against a live install and normalize to tz-aware
+    before populating this field, or a naive `br` timestamp here would raise
+    `TypeError` the first time a staleness comparison touches it.
     """
 
     percent_complete: float | None

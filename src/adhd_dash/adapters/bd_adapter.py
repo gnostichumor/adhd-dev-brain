@@ -54,12 +54,21 @@ async def _run_local(path: str, argv: list[str]) -> str:
     return stdout.decode()
 
 
+def _build_remote_command(argv: list[str], path: str) -> str:
+    """Build the shell string asyncssh's `conn.run(str)` executes remotely.
+
+    Unlike `_run_local`'s exec-array subprocess, asyncssh's string form is
+    interpreted by the remote shell -- every token must be quoted or a
+    project path/argv element with a space or shell metacharacter is a
+    command-injection surface, not just a broken invocation. Pulled out as
+    its own function so this quoting can be tested directly, independently
+    of the SSH transport.
+    """
+    return " ".join(shlex.quote(arg) for arg in [*argv, "-C", path])
+
+
 async def _run_remote(host: HostConfig, path: str, argv: list[str]) -> str:
-    # asyncssh's conn.run(str) executes through the remote shell, unlike
-    # _run_local's exec-array subprocess -- every token must be quoted or a
-    # project path/argv element with a space or shell metacharacter is a
-    # command-injection surface, not just a broken invocation.
-    command = " ".join(shlex.quote(arg) for arg in [*argv, "-C", path])
+    command = _build_remote_command(argv, path)
     # known_hosts intentionally omitted: asyncssh then verifies against the
     # system's default known_hosts file. Even on a Tailscale-only network,
     # skipping host-key verification (known_hosts=None) would accept any
