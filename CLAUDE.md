@@ -145,7 +145,8 @@ service block inside the existing `apps-mine` module in the separate
   R17/R18 and `docs/architecture.md` §5.
 - **Two Beads CLIs, one normalized type.** Tracked projects use a mix of `bd`
   (gastownhall, confirmed `bd status --json` schema) and `br` (Dicklesworthstone
-  beads_rust, schema NOT yet verified against a live install — confirm before
+  beads_rust, schema confirmed against a live v0.2.15 install — see
+  `docs/architecture.md` §1a for the full field mapping and gotchas before
   implementing `BrAdapter`). Both normalize to a common `ProjectStatus`.
 - **Never commit secrets.** This repo holds only application source; runtime
   secrets (SSH keys, API keys) are injected via Infisical at deploy time in
