@@ -143,6 +143,20 @@ class as `bd`'s (`bd` lacks the fractional-second component but is
 otherwise identical), pinned to v0.2.15 per this doc's usual re-verify-on-
 upgrade caveat.
 
+**`total_issues` excludes tombstoned issues, confirmed empirically.** `br`
+has two statuses `bd` doesn't (`tombstone`, `draft`) whose effect on
+`summary.total_issues` was an open question for `percent_complete`'s
+denominator (a tombstoned/draft issue inflating `total_issues` without
+being reflected in `closed_issues` would skew the ratio). Verified against
+a throwaway `br init`'d project: creating 2 issues gave `total_issues: 2`;
+deleting (`br delete`, which tombstones) one dropped it to `total_issues: 1`
+with `tombstone_issues: 1` tracked as its own separate counter — tombstoned
+issues are excluded from `total_issues`, not counted in it. `draft`'s effect
+is unverified (no `br` command was found to create a draft issue in this
+pass) but is assumed to follow the same exclude-from-total pattern until
+observed otherwise; `BrAdapter` takes no special action for either since
+`total_issues`/`closed_issues` are read as-is from `br`'s own summary.
+
 ## 2. Deployment
 
 Ships as a new service block inside the existing `apps-mine` module in `homelab-iac` (not its own module) — this repo holds only the application source.
