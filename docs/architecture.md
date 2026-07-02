@@ -36,13 +36,12 @@ as distinct fields in the schema, matching `bd`'s two-concept model — but
 both were `null` in every sampled issue (no fleet/multi-agent usage in this
 project), so their real-world value convention is unconfirmed.
 
-**Enum differences (`BrAdapter` needs an explicit mapping decision):**
+**Enum differences (background only — NOT a `BrAdapter` v1 blocker, see §1b):**
 - `status`: `br` has 8 values — `open`, `in_progress`, `blocked`,
-  `deferred`, `draft`, `closed`, `tombstone`, `pinned` — vs `bd`'s 3
-  (`open`, `in_progress`, `closed`). `blocked`, `deferred`, `draft`,
-  `tombstone`, and `pinned` have no `bd` equivalent; `BrAdapter` must decide
-  how each folds into `ProjectStatus`'s staleness/percent-complete model
-  (e.g. does `blocked` count as "not stale" the way `in_progress` does?).
+  `deferred`, `draft`, `closed`, `tombstone`, `pinned` (a status *value* —
+  see §1b for why this is not the same thing as the `pinned` *field* listed
+  below) — vs `bd`'s 3 (`open`, `in_progress`, `closed`). `blocked`,
+  `deferred`, `draft`, `tombstone`, and `pinned` have no `bd` equivalent.
 - `issue_type`: `br` adds `docs` and `question` on top of the `epic`,
   `feature`, `task`, `chore`, `bug` set `bd` uses.
 - `priority`: `br` documents `0=Critical … 4=Backlog` (int) in its schema.
@@ -65,7 +64,9 @@ project), so their real-world value convention is unconfirmed.
 `external_ref`, `source_system`, `source_repo`, `source_repo_path`,
 `agent_context`, `deleted_at`/`deleted_by`/`delete_reason` (tombstone
 soft-delete metadata), `compaction_level`/`compacted_at`/`original_size`,
-`ephemeral`, `pinned`, `is_template`. None of these have an obvious
+`ephemeral`, `pinned`, `is_template`. **This `pinned` is a distinct boolean
+field, not the same thing as the `pinned` *status value* listed above** —
+see §1b for the disambiguation. None of these fields have an obvious
 `ProjectStatus` field to map to; `BrAdapter` can ignore them for v1. Full
 list: `br schema issue --format json`.
 
@@ -90,6 +91,57 @@ the schema export):**
   reliable signal of which CLI (`bd` vs `br`) manages it** — a `br` project
   can use a `bd-`-style prefix. Adapter selection must be based on which
   binary/config is present, never inferred from ID string shape.
+- **`br list --format json`'s response is a wrapper object, not a bare
+  array** — `{"issues": [...], "total", "limit", "offset", "has_more"}`.
+  This differs from `bd list --json`, which returns a bare array directly.
+  `BrAdapter` must unwrap `.issues` before indexing; `json.loads(...)` alone
+  is not enough the way it is for `bd`.
+- **`br` has no `-C`/`--directory` global flag** — confirmed empirically:
+  `br -C <path> status --json` errors `unexpected argument '-C' found`. `br
+  --help` only exposes `--db <path>`, an explicit database *file* path, not
+  a project directory. `BrAdapter` targets a project by other means instead:
+  locally, it passes `path` as the subprocess's `cwd` (so `br` auto-discovers
+  `.beads/*.db` the way it would run by hand from inside the project);
+  remotely (over `asyncssh`), it builds `cd <path> && <argv>` (both
+  `shlex`-quoted) rather than appending `-C <path>` the way `BdAdapter`'s
+  remote command builder does.
+
+## 1b. `BrAdapter` implementation decisions (resolves `adhd-dash-ggq`)
+
+**`ProjectStatus` v1 needs no per-issue `status`/`issue_type` enum mapping
+between `bd` and `br`.** `percent_complete` and `last_beads_activity_at` —
+the only two fields a Beads adapter populates — are each computed from a
+single pre-computed aggregate the CLI itself already produces
+(`summary.total_issues`/`summary.closed_issues` for the former, the single
+most-recently-updated issue's `updated_at` for the latter), never by
+iterating issues and reclassifying each one's `status`/`issue_type` into a
+`bd`-shaped bucket. Both aggregate field names are confirmed identical
+across `bd` and `br` (§1a above), so `BrAdapter` reads them the same way
+`BdAdapter` does, with zero translation logic. The `status`/`issue_type`
+enum differences documented in §1a remain useful background for any *future*
+feature that does need per-issue classification (e.g. a per-issue detail
+view), but they are not a blocker for `BrAdapter` and `ProjectStatus` v1 —
+this is the concrete resolution `adhd-dash-ggq` asked for.
+
+**`pinned` names two different things, not one.** §1a's "Enum differences"
+list includes `pinned` as one of `status`'s 8 possible *values* (an issue
+can be in the `pinned` status, alongside `open`/`closed`/etc.). Separately,
+§1a's "`br`-only fields" list includes `pinned` as a distinct boolean
+*field* name (grouped with `ephemeral`/`is_template`) — an issue has a
+`pinned: true/false` attribute independent of what `status` value it's in.
+These share a name by coincidence of `br`'s own schema, not because they're
+the same concept; neither is used by `BrAdapter`/`ProjectStatus` v1 either
+way.
+
+**`br`'s timestamp format is confirmed, closing the hedge `adhd-dash-8d2.3`
+left in `ProjectStatus.last_beads_activity_at`'s docstring.** Verified
+against the same live `br` v0.2.15 install as the rest of §1a: `br` emits
+`Z`-suffixed ISO8601 timestamps with microsecond fractional seconds (e.g.
+`"2026-06-15T04:58:18.381241Z"`), which `datetime.fromisoformat` parses
+directly into a timezone-aware UTC `datetime` on Python 3.12 — same format
+class as `bd`'s (`bd` lacks the fractional-second component but is
+otherwise identical), pinned to v0.2.15 per this doc's usual re-verify-on-
+upgrade caveat.
 
 ## 2. Deployment
 
