@@ -81,3 +81,7 @@ Desktop.ini
 
 # --- Claude Code local overrides (never commit local-only permission tweaks) ---
 .claude/settings.local.json
+
+# --- Claude Code nested worktrees (EnterWorktree checks these out inside
+# the repo's own working directory -- never part of any branch's tree) ---
+.claude/worktrees/
