@@ -10,9 +10,17 @@ this client is what makes that fallback possible, so every failure mode
 (404, 403, network error, malformed response) resolves to `None` rather than
 raising. "No remote configured" is a caller-side concern: a project with no
 GitHub remote URL simply never calls this client.
+
+Both lookups are cached per `(owner, repo)`, independently, for
+`check_ttl_minutes` (from `config.github.check_ttl_minutes`) -- this is the
+"rate-limit/TTL behavior configurable via config.yaml" half of this issue's
+Definition of Done. A resolved `None` (no releases, unreachable repo) is
+cached the same as a real value: re-probing an unreachable repo every call
+would defeat the point of the TTL, and the future poll cycle calling this
+client will do so far more often than GitHub's signal actually changes.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from pydantic import BaseModel
@@ -49,8 +57,15 @@ class GithubClient:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._token = token or None
-        self._check_ttl_minutes = check_ttl_minutes
+        self._ttl = timedelta(minutes=check_ttl_minutes)
         self._client = client or httpx.AsyncClient(base_url=_GITHUB_API_BASE_URL)
+
+        # Each cache maps (owner, repo) -> (cached_at, value). The value
+        # itself may legitimately be None (e.g. "no releases"), so presence
+        # of the dict entry -- not truthiness of the cached value -- is what
+        # signals a cache hit; see `_cache_fresh`.
+        self._release_cache: dict[tuple[str, str], tuple[datetime, Release | None]] = {}
+        self._commit_cache: dict[tuple[str, str], tuple[datetime, datetime | None]] = {}
 
     async def aclose(self) -> None:
         """Close the underlying httpx client. Call during app shutdown."""
@@ -61,6 +76,9 @@ class GithubClient:
             return {"Authorization": f"Bearer {self._token}"}
         return {}
 
+    def _cache_fresh(self, cached_at: datetime) -> bool:
+        return datetime.now(UTC) - cached_at < self._ttl
+
     async def get_latest_release(self, owner: str, repo: str) -> Release | None:
         """Return the latest Release for `owner/repo`, or `None`.
 
@@ -70,7 +88,19 @@ class GithubClient:
         private/unreachable (403/404), or a network error occurred. Callers
         (the future staleness evaluator) treat all of these the same way:
         this signal just isn't available.
+
+        Cached per `(owner, repo)` for `check_ttl_minutes`.
         """
+        key = (owner, repo)
+        cached = self._release_cache.get(key)
+        if cached is not None and self._cache_fresh(cached[0]):
+            return cached[1]
+
+        result = await self._fetch_latest_release(owner, repo)
+        self._release_cache[key] = (datetime.now(UTC), result)
+        return result
+
+    async def _fetch_latest_release(self, owner: str, repo: str) -> Release | None:
         if not owner or not repo:
             return None
         try:
@@ -107,7 +137,20 @@ class GithubClient:
         commits endpoint, not an empty list -- handled the same as any
         other non-200), a private/unreachable repo (403/404), or a network
         error.
+
+        Cached per `(owner, repo)` for `check_ttl_minutes`, independently of
+        `get_latest_release`'s cache.
         """
+        key = (owner, repo)
+        cached = self._commit_cache.get(key)
+        if cached is not None and self._cache_fresh(cached[0]):
+            return cached[1]
+
+        result = await self._fetch_latest_commit_activity(owner, repo)
+        self._commit_cache[key] = (datetime.now(UTC), result)
+        return result
+
+    async def _fetch_latest_commit_activity(self, owner: str, repo: str) -> datetime | None:
         if not owner or not repo:
             return None
         try:

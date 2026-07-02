@@ -1,7 +1,8 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
+import time_machine
 
 from adhd_dash.github_client import GithubClient, Release
 
@@ -179,3 +180,142 @@ async def test_authorization_header_omitted_when_no_token() -> None:
     await client.get_latest_release("octocat", "hello-world")
 
     assert captured["authorization"] is None
+
+
+# --- TTL caching -------------------------------------------------------
+
+
+async def test_get_latest_release_cached_within_ttl() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=RELEASE_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False) as traveler:
+        first = await client.get_latest_release("octocat", "hello-world")
+        traveler.shift(timedelta(minutes=30))
+        second = await client.get_latest_release("octocat", "hello-world")
+
+    assert first == second
+    assert call_count == 1
+
+
+async def test_get_latest_release_refetches_after_ttl_expires() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=RELEASE_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False) as traveler:
+        await client.get_latest_release("octocat", "hello-world")
+        traveler.shift(timedelta(minutes=61))
+        await client.get_latest_release("octocat", "hello-world")
+
+    assert call_count == 2
+
+
+async def test_get_latest_commit_activity_cached_within_ttl() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=COMMIT_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False) as traveler:
+        first = await client.get_latest_commit_activity("octocat", "hello-world")
+        traveler.shift(timedelta(minutes=30))
+        second = await client.get_latest_commit_activity("octocat", "hello-world")
+
+    assert first == second
+    assert call_count == 1
+
+
+async def test_get_latest_commit_activity_refetches_after_ttl_expires() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=COMMIT_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False) as traveler:
+        await client.get_latest_commit_activity("octocat", "hello-world")
+        traveler.shift(timedelta(minutes=61))
+        await client.get_latest_commit_activity("octocat", "hello-world")
+
+    assert call_count == 2
+
+
+async def test_release_and_commit_caches_are_independent() -> None:
+    release_calls = 0
+    commit_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal release_calls, commit_calls
+        if "releases" in request.url.path:
+            release_calls += 1
+            return httpx.Response(200, json=RELEASE_JSON)
+        commit_calls += 1
+        return httpx.Response(200, json=COMMIT_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    await client.get_latest_release("octocat", "hello-world")
+    await client.get_latest_release("octocat", "hello-world")
+    await client.get_latest_commit_activity("octocat", "hello-world")
+    await client.get_latest_commit_activity("octocat", "hello-world")
+
+    assert release_calls == 1
+    assert commit_calls == 1
+
+
+async def test_caches_are_independent_per_repo() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json=RELEASE_JSON)
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    await client.get_latest_release("octocat", "repo-one")
+    await client.get_latest_release("octocat", "repo-two")
+
+    assert call_count == 2
+
+
+async def test_no_release_result_is_cached_too() -> None:
+    """A resolved None (no releases) must be cached like any other value --
+    otherwise a repo with no releases would bypass the TTL and hit the
+    transport on every call."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = make_client(handler, check_ttl_minutes=60)
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False) as traveler:
+        first = await client.get_latest_release("octocat", "no-releases")
+        traveler.shift(timedelta(minutes=30))
+        second = await client.get_latest_release("octocat", "no-releases")
+
+    assert first is None
+    assert second is None
+    assert call_count == 1
