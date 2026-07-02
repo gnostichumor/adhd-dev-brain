@@ -104,3 +104,14 @@ logging:
 def test_load_config_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "does-not-exist.yaml")
+
+
+def test_shipped_config_yaml_is_valid() -> None:
+    """The repo-root config.yaml is a shipped deliverable -- lock it to the
+    schema so drift between the two is caught by the suite, not only by a
+    manual boot."""
+    repo_root = Path(__file__).resolve().parent.parent
+    config = load_config(repo_root / "config.yaml")
+
+    assert config.hosts == []
+    assert config.github.token == ""
