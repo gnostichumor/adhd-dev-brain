@@ -128,6 +128,20 @@ async def test_get_status_raises_on_nonzero_exit() -> None:
         await adapter.get_status("/srv/projects/broken")
 
 
+# --- get_status: malformed/missing summary fields ---------------------------
+
+
+async def test_get_status_raises_on_missing_summary_fields() -> None:
+    """A `bd status --json` payload missing `total_issues`/`closed_issues` is
+    a malformed-response bug surface, not a routine "no data" case -- this
+    adapter fails loudly (KeyError) rather than defaulting silently, matching
+    this repo's "fail loudly" convention (see adhd_dash.config's docstring)."""
+    adapter = BdAdapter(runner=make_runner({"summary": {}}, LIST_JSON_EMPTY))
+
+    with pytest.raises(KeyError):
+        await adapter.get_status("/srv/projects/malformed")
+
+
 # --- get_status: host routing ----------------------------------------------
 
 

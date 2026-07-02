@@ -22,6 +22,7 @@ from GitHub is.
 
 import asyncio
 import json
+import shlex
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
@@ -54,7 +55,11 @@ async def _run_local(path: str, argv: list[str]) -> str:
 
 
 async def _run_remote(host: HostConfig, path: str, argv: list[str]) -> str:
-    command = " ".join(argv) + f" -C {path}"
+    # asyncssh's conn.run(str) executes through the remote shell, unlike
+    # _run_local's exec-array subprocess -- every token must be quoted or a
+    # project path/argv element with a space or shell metacharacter is a
+    # command-injection surface, not just a broken invocation.
+    command = " ".join(shlex.quote(arg) for arg in [*argv, "-C", path])
     # known_hosts intentionally omitted: asyncssh then verifies against the
     # system's default known_hosts file. Even on a Tailscale-only network,
     # skipping host-key verification (known_hosts=None) would accept any
