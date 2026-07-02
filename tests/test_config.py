@@ -38,6 +38,57 @@ def test_load_config_valid(tmp_path: Path) -> None:
     assert config.logging.level == "INFO"
 
 
+def test_load_config_multiple_hosts(tmp_path: Path) -> None:
+    """Each host entry's SSH connection settings resolve independently --
+    no field leaks or aliases across entries in the list."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+staleness:
+  default_threshold_days: 14
+polling:
+  interval_minutes: 60
+hosts:
+  - name: workstation
+    ssh_host: 100.64.0.1
+    ssh_user: josh
+    ssh_key_path: /home/josh/.ssh/id_workstation
+    roots:
+      - /home/josh/projects
+  - name: homelab-server
+    ssh_host: 100.64.0.2
+    ssh_user: deploy
+    ssh_key_path: /home/josh/.ssh/id_homelab
+    roots:
+      - /srv/apps
+      - /srv/scratch
+github:
+  check_ttl_minutes: 60
+  token: ""
+logging:
+  level: INFO
+"""
+    )
+
+    config = load_config(config_path)
+
+    assert len(config.hosts) == 2
+
+    assert config.hosts[0].name == "workstation"
+    assert config.hosts[0].ssh_host == "100.64.0.1"
+    assert config.hosts[0].ssh_user == "josh"
+    assert config.hosts[0].ssh_key_path == "/home/josh/.ssh/id_workstation"
+    assert config.hosts[0].roots == ["/home/josh/projects"]
+
+    assert config.hosts[1].name == "homelab-server"
+    assert config.hosts[1].ssh_host == "100.64.0.2"
+    assert config.hosts[1].ssh_user == "deploy"
+    assert config.hosts[1].ssh_key_path == "/home/josh/.ssh/id_homelab"
+    assert config.hosts[1].roots == ["/srv/apps", "/srv/scratch"]
+
+    assert config.hosts[0].roots != config.hosts[1].roots
+
+
 def test_load_config_empty_hosts_list(tmp_path: Path) -> None:
     """hosts is allowed to be empty -- no real hosts configured yet is valid."""
     config_path = tmp_path / "config.yaml"
