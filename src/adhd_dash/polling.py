@@ -85,4 +85,23 @@ def poll(config: Config, engine: Engine) -> None:
                     project, _created = get_or_create_project(session, host.name, resolved_path)
                     project.last_seen_at = _utcnow()
                     session.add(project)
-        session.commit()
+                    # Commit per project, not once at the end of the whole
+                    # pass (adhd-dash-v28). `get_or_create_project` already
+                    # commits/rolls back internally on its create path -- if
+                    # this whole loop shared one long-lived transaction and
+                    # a *later* project's `IntegrityError`+rollback fired
+                    # (e.g. a race with a concurrent manual `/refresh` also
+                    # calling `poll()`), that rollback would wipe out the
+                    # `last_seen_at` stamps this loop already set for
+                    # *earlier*, unrelated projects in the same pass --
+                    # silently lossy until the next poll self-heals it.
+                    # Committing here makes each project's stamp its own
+                    # transaction, so it can't be discarded by a later
+                    # project's failure. This composes cleanly with
+                    # `get_or_create_project`'s own commit: on the
+                    # newly-created path that commit has already persisted
+                    # the row before this one runs, so this call has just
+                    # the `last_seen_at` update pending; on the
+                    # already-tracked path nothing was committed yet, so
+                    # this is the only commit for that project.
+                    session.commit()

@@ -1,5 +1,7 @@
+import sqlite3
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -187,6 +189,26 @@ def test_refresh_triggers_poll_using_shared_db_engine(
     with Session(engine) as session:
         rows = session.exec(select(TrackedProject).where(TrackedProject.host == "local")).all()
     assert len(rows) == 1
+
+
+def test_refresh_returns_503_when_poll_raises_operational_error(
+    app_state_for_refresh: None,
+) -> None:
+    """A concurrent scheduled poll can leave SQLite locked long enough that
+    the busy-timeout (`adhd_dash.db.create_db_engine`) is exceeded anyway --
+    `poll()` (or a `Session` commit inside it) then raises
+    `sqlite3.OperationalError` (adhd-dash-v28). `POST /api/v1/refresh` must
+    turn that into a clean 503, not an unhandled 500."""
+    with patch(
+        "adhd_dash.api.v1.poll",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ):
+        response = client.post("/api/v1/refresh")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "busy"
+    assert "detail" in body
 
 
 def test_add_project_unreadable_path_returns_400_not_500(
