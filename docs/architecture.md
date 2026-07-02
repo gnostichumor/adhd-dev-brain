@@ -105,6 +105,12 @@ the schema export):**
   remotely (over `asyncssh`), it builds `cd <path> && <argv>` (both
   `shlex`-quoted) rather than appending `-C <path>` the way `BdAdapter`'s
   remote command builder does.
+- **`br list --sort updated_at` defaults to descending (most-recent-first)**
+  — confirmed empirically against a live install: without `--reverse`, the
+  first two results were the two newest `updated_at` values; with
+  `--reverse`, the first result was the oldest. Same convention `bd`'s
+  `--sort updated` uses (also confirmed empirically, see `BdAdapter`).
+  `--reverse` must NOT be passed when the goal is "most recent activity."
 
 ## 1b. `BrAdapter` implementation decisions (resolves `adhd-dash-ggq`)
 

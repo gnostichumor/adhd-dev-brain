@@ -136,11 +136,14 @@ class BrAdapter:
           verified empirically that without it, `br list` defaults to
           excluding closed issues entirely (would silently under-report
           activity on projects where the most recent update was a close).
-          `--sort updated_at` defaults to descending (most-recent-first),
-          the same convention `bd`'s `--sort updated` uses -- `--reverse`
-          must NOT be passed, or `--limit 1` would return the oldest issue
-          instead. An empty `.issues` (zero issues) yields
-          `last_beads_activity_at = None`.
+          `--sort updated_at` defaults to descending (most-recent-first) --
+          verified empirically against a live install (without `--reverse`,
+          the first two results were the two newest `updated_at` values;
+          with `--reverse`, the first result was the oldest), the same
+          convention `bd`'s `--sort updated` uses. `--reverse` must NOT be
+          passed, or `--limit 1` would return the oldest issue instead. An
+          empty `.issues` (zero issues) yields `last_beads_activity_at =
+          None`.
 
         `br`'s timestamps are confirmed `Z`-suffixed ISO8601 with
         microsecond precision (e.g. `"2026-06-15T04:58:18.381241Z"`),
