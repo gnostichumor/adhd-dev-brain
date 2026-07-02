@@ -1,0 +1,10 @@
+staleness:
+  default_threshold_days: 14
+polling:
+  interval_minutes: 60
+hosts: []
+github:
+  check_ttl_minutes: 60
+  token: ""
+logging:
+  level: INFO
