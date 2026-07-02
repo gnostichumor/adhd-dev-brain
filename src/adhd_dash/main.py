@@ -34,6 +34,15 @@ def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
         minutes=config.polling.interval_minutes,
         args=[config, engine],
         id="poll",
+        # Prevent two SCHEDULED poll passes from ever overlapping each
+        # other if one pass runs longer than the configured interval
+        # (adhd-dash-v28). This does NOT protect against a scheduled poll
+        # overlapping a manual `POST /api/v1/refresh` -- that route calls
+        # `poll()` directly, bypassing this scheduler's job machinery
+        # entirely. See the comment at that call site (api/v1.py's
+        # `refresh`) for why that overlap is instead an accepted, bounded
+        # race rather than something actively prevented.
+        max_instances=1,
     )
     return scheduler
 

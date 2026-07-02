@@ -28,10 +28,19 @@ def create_db_engine(path: str | Path = DEFAULT_DB_PATH) -> Engine:
     `check_same_thread=False` matches SQLModel's documented FastAPI pattern:
     the same engine is shared across request-handling threads/tasks, with
     per-request `Session`s providing isolation.
+
+    `timeout` (the Python `sqlite3` driver's busy-timeout, in seconds --
+    adhd-dash-v28) makes a writer that finds the DB locked (e.g. a scheduled
+    `poll()` pass and a manual `POST /api/v1/refresh` writing at the same
+    moment) wait and retry instead of immediately raising
+    `sqlite3.OperationalError: database is locked`. 5s is generous enough to
+    ride out a same-machine poll/refresh overlap without a caller noticing a
+    delay, while still failing fast (rather than hanging) for this
+    single-operator home-lab tool if something is genuinely stuck.
     """
     return create_engine(
         f"sqlite:///{path}",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 5},
     )
 
 
