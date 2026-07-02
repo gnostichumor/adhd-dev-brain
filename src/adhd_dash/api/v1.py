@@ -77,7 +77,17 @@ def add_project(
     remote-validation path for non-local hosts.
     """
     directory = Path(body.path)
-    if not directory.is_dir():
+    try:
+        is_dir = directory.is_dir()
+    except OSError:
+        # Path.is_dir() raises PermissionError (not just False) when a
+        # parent directory isn't traversable -- a real scenario for an
+        # endpoint accepting arbitrary user-supplied paths (e.g. another
+        # user's restricted home directory). Same class of bug fixed in
+        # discovery.py's _walk/detect_project (adhd-dash-c6f.2) -- treat it
+        # as "can't use this path" (400), not an unhandled 500.
+        is_dir = False
+    if not is_dir:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="path does not exist or is not a directory",

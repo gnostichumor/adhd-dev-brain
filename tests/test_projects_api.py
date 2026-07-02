@@ -127,3 +127,28 @@ def test_add_project_path_without_beads_or_git_returns_400(tmp_path: Path) -> No
 
     assert response.status_code == 400
     assert "detail" in response.json()
+
+
+def test_add_project_unreadable_path_returns_400_not_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Path.is_dir() raises PermissionError (not just False) when a parent
+    directory isn't traversable -- a real scenario for an endpoint accepting
+    arbitrary user-supplied paths. Must be a clean 400, not an unhandled 500
+    -- the same PermissionError class fixed in discovery.py (adhd-dash-c6f.2)
+    reintroduced at this new call site."""
+    restricted = tmp_path / "restricted"
+
+    original_is_dir = Path.is_dir
+
+    def fake_is_dir(self: Path) -> bool:
+        if self == restricted:
+            raise PermissionError(f"Permission denied: {self}")
+        return original_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+
+    response = client.post("/api/v1/projects", json={"host": "local", "path": str(restricted)})
+
+    assert response.status_code == 400
+    assert "detail" in response.json()
