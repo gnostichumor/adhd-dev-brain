@@ -87,7 +87,8 @@ each needs its own test fixture, not just the happy path.
   There's no automated VCR dashboard for a project this size — the practical
   version of this rule is: if you claim an issue and can't get it to a real
   Definition-of-Done pass, don't claim the next one. Report the blocker
-  (`bd human <id>` or a comment) instead of moving on.
+  (label it `human` — `bd update <id> --labels human`, then `bd human list`
+  surfaces it — or a comment) instead of moving on.
 
 ---
 
