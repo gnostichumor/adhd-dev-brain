@@ -89,18 +89,27 @@ def add_project(
             detail="path is not a Beads project or git repository",
         )
 
-    existing = _select_project(session, body.host, body.path)
+    # Resolve once, after confirming the directory exists, and use this one
+    # canonical form for the SELECT and the stored row -- otherwise two
+    # requests for the same real directory expressed differently (trailing
+    # slash, relative path, a symlink) would each pass validation but miss
+    # each other on lookup, defeating "add-duplicate is idempotent" (the
+    # UniqueConstraint wouldn't catch it either, since the raw strings
+    # differ).
+    resolved_path = str(directory.resolve())
+
+    existing = _select_project(session, body.host, resolved_path)
     if existing is not None:
         response.status_code = status.HTTP_200_OK
         return existing
 
-    project = TrackedProject(host=body.host, path=body.path)
+    project = TrackedProject(host=body.host, path=resolved_path)
     session.add(project)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
-        existing = _select_project(session, body.host, body.path)
+        existing = _select_project(session, body.host, resolved_path)
         if existing is None:
             # The insert failed with a uniqueness conflict, but the row it
             # conflicted with isn't found on re-query -- something other

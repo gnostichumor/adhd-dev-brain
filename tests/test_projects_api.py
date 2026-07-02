@@ -73,6 +73,26 @@ def test_add_duplicate_project_is_idempotent(tmp_path: Path) -> None:
     assert first.json()["id"] == second.json()["id"]
 
 
+def test_add_duplicate_via_trailing_slash_is_still_idempotent(tmp_path: Path) -> None:
+    """The same real directory expressed differently (trailing slash) must
+    still be recognized as a duplicate -- validation resolves the path
+    before it's used for lookup/storage, so string-level aliases of the same
+    directory don't defeat idempotency."""
+    project_dir = _make_project_dir(tmp_path)
+
+    first = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir)})
+    second = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir) + "/"})
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert first.json()["id"] == second.json()["id"]
+
+    engine = create_db_engine(tmp_path / "test-state.db")
+    with Session(engine) as session:
+        rows = session.exec(select(TrackedProject).where(TrackedProject.host == "local")).all()
+    assert len(rows) == 1
+
+
 def test_add_duplicate_project_leaves_exactly_one_row(tmp_path: Path) -> None:
     project_dir = _make_project_dir(tmp_path)
     payload = {"host": "local", "path": str(project_dir)}
