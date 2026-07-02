@@ -24,15 +24,16 @@ class ProjectStatus(BaseModel):
     completion percentage (PRD R18), not a 0% one.
 
     `last_beads_activity_at` is `None` only when the project has zero
-    issues; otherwise it is timezone-aware (UTC) when populated by
-    `BdAdapter` -- `bd`'s `Z`-suffixed ISO8601 timestamps are confirmed
-    against a live install (see `BdAdapter.get_status`). `br`'s timestamp
-    *string format* has NOT been verified the same way: docs/architecture.md
-    §1a confirms `bd`/`br` share field names (`updated_at`, etc.) but never
-    samples `br`'s actual timestamp format -- BrAdapter (adhd-dash-8d2.4)
-    must confirm this against a live install and normalize to tz-aware
-    before populating this field, or a naive `br` timestamp here would raise
-    `TypeError` the first time a staleness comparison touches it.
+    issues; otherwise it is timezone-aware (UTC), for both adapters that
+    populate this field. Both `bd`'s and `br`'s timestamp formats are
+    confirmed against live installs: `bd` emits `Z`-suffixed ISO8601 (see
+    `BdAdapter.get_status`); `br` (pinned to v0.2.15, re-verify on upgrade --
+    same caveat `docs/architecture.md` §1a uses for `br`'s other confirmed
+    fields) emits `Z`-suffixed ISO8601 with microsecond fractional seconds
+    (e.g. `"2026-06-15T04:58:18.381241Z"`), which `datetime.fromisoformat`
+    parses directly into a timezone-aware UTC `datetime` on Python 3.12 (see
+    `BrAdapter.get_status`). No naive-datetime normalization step is needed
+    for either CLI.
     """
 
     percent_complete: float | None
