@@ -61,17 +61,32 @@ def discover_projects(root: Path) -> list[ProjectRef]:
     return sorted(results, key=lambda ref: ref.path)
 
 
-def _walk(directory: Path, results: list[ProjectRef]) -> None:
+def detect_project(directory: Path) -> ProjectRef | None:
+    """Check whether `directory` itself (not its subtree) is a project.
+
+    `.beads` takes precedence when both `.beads` and `.git` are present. A
+    plain `.git` entry (directory or file, no `.beads`) yields
+    `beads_initialized=False`. Neither present -> `None`. An `OSError` while
+    stat-ing `.beads`/`.git` (e.g. an unreadable parent) is treated the same
+    way as `_walk`'s existing handling: `None`, not a fatal error.
+    """
     try:
         has_beads = (directory / ".beads").is_dir()
         has_git = (directory / ".git").exists()
     except OSError:
-        return
+        return None
 
     if has_beads:
-        results.append(ProjectRef(path=str(directory), beads_initialized=True))
-    elif has_git:
-        results.append(ProjectRef(path=str(directory), beads_initialized=False))
+        return ProjectRef(path=str(directory), beads_initialized=True)
+    if has_git:
+        return ProjectRef(path=str(directory), beads_initialized=False)
+    return None
+
+
+def _walk(directory: Path, results: list[ProjectRef]) -> None:
+    ref = detect_project(directory)
+    if ref is not None:
+        results.append(ref)
 
     try:
         children = list(directory.iterdir())
