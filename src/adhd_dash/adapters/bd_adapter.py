@@ -55,11 +55,14 @@ async def _run_local(path: str, argv: list[str]) -> str:
 
 async def _run_remote(host: HostConfig, path: str, argv: list[str]) -> str:
     command = " ".join(argv) + f" -C {path}"
+    # known_hosts intentionally omitted: asyncssh then verifies against the
+    # system's default known_hosts file. Even on a Tailscale-only network,
+    # skipping host-key verification (known_hosts=None) would accept any
+    # host key silently -- a real MITM/host-reuse risk, not just a formality.
     async with asyncssh.connect(
         host.ssh_host,
         username=host.ssh_user,
         client_keys=[host.ssh_key_path],
-        known_hosts=None,
     ) as conn:
         result = await conn.run(command)
         if result.exit_status != 0:
