@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import time_machine
+from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
 
@@ -15,7 +16,7 @@ from adhd_dash.config import (
     StalenessConfig,
 )
 from adhd_dash.db import create_db_engine, init_db
-from adhd_dash.main import build_scheduler
+from adhd_dash.main import _log_poll_job_error, build_scheduler
 from adhd_dash.models import TrackedProject
 from adhd_dash.polling import poll
 from adhd_dash.projects import get_or_create_project as real_get_or_create_project
@@ -256,3 +257,37 @@ def test_build_scheduler_registers_poll_job_with_max_instances_one(tmp_path: Pat
 
     job = scheduler.get_jobs()[0]
     assert job.max_instances == 1
+
+
+def test_build_scheduler_registers_a_job_error_listener(tmp_path: Path) -> None:
+    """`build_scheduler` must register a listener for EVENT_JOB_ERROR so a
+    scheduled poll's failure isn't silently swallowed by APScheduler's
+    default handling (adhd-dash-s85)."""
+    config = _make_config(roots=[], interval_minutes=15)
+    engine = create_db_engine(tmp_path / "state.db")
+
+    scheduler = build_scheduler(config, engine)
+
+    assert any(mask & EVENT_JOB_ERROR for _callback, mask in scheduler._listeners)
+
+
+def test_poll_job_error_listener_logs_the_exception(caplog: pytest.LogCaptureFixture) -> None:
+    """The registered listener itself must log the job's exception at ERROR
+    level (adhd-dash-s85), not just be present but inert."""
+    error = RuntimeError("simulated busy-timeout exceeded")
+    event = JobExecutionEvent(
+        code=EVENT_JOB_ERROR,
+        job_id="poll",
+        jobstore="default",
+        scheduled_run_time=None,
+        exception=error,
+        traceback=None,
+    )
+
+    with caplog.at_level("ERROR"):
+        _log_poll_job_error(event)
+
+    assert any(
+        record.levelname == "ERROR" and "Scheduled poll job failed" in record.message
+        for record in caplog.records
+    )
