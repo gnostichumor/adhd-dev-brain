@@ -55,7 +55,7 @@ class LoggingConfig(BaseModel):
 class DbConfig(BaseModel):
     """SQLite engine tuning for state.db."""
 
-    busy_timeout_seconds: int = 5
+    busy_timeout_seconds: int = Field(default=5, gt=0)
 
 
 class Config(BaseModel):

@@ -25,6 +25,21 @@ from adhd_dash.projects import get_or_create_project
 router = APIRouter(prefix="/api/v1")
 
 
+def _is_sqlite_busy_error(exc: sqlite3.OperationalError | SQLAlchemyOperationalError) -> bool:
+    """True only for the SQLite busy-timeout condition (`SQLITE_BUSY` --
+    "database is locked"), not other `OperationalError`s (adhd-dash-0yo).
+
+    Checked via `sqlite_errorcode` (populated by the `sqlite3` driver on
+    every error it raises, Python 3.11+) rather than matching text in the
+    exception's rendered message: the message can embed unrelated bound
+    parameter values (SQLAlchemy doesn't `hide_parameters` here) that could
+    coincidentally contain matching text, and a differently-worded lock
+    message wouldn't match a literal string check at all.
+    """
+    orig = exc.orig if isinstance(exc, SQLAlchemyOperationalError) else exc
+    return getattr(orig, "sqlite_errorcode", None) == sqlite3.SQLITE_BUSY
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     """Liveness check for the service."""
@@ -131,21 +146,21 @@ def refresh(request: Request) -> dict[str, str] | JSONResponse:
     writer wait briefly rather than fail immediately, and `poll()` now
     commits per-project (not once for the whole pass), so a genuine
     conflict can only cost the one project involved, not the whole pass. If
-    the busy-timeout is exceeded anyway, SQLite raises "database is locked"
-    -- surfaced here as `sqlite3.OperationalError` directly, or as
-    SQLAlchemy's wrapped `OperationalError` (whose string form still
-    contains the original driver message) when it happens inside a
-    `Session` commit -- and turned into a 503 below instead of an unhandled
-    500. Only that specific "database is locked" condition is treated as
-    the bounded/accepted race (adhd-dash-0yo); any other `OperationalError`
-    (e.g. "no such table", a corrupt/malformed database) is not transient
-    and propagates as a normal unhandled 500 instead of being mislabeled
-    "busy, try again".
+    the busy-timeout is exceeded anyway, SQLite raises `SQLITE_BUSY`
+    ("database is locked") -- surfaced here as `sqlite3.OperationalError`
+    directly, or as SQLAlchemy's wrapped `OperationalError` (whose `.orig`
+    is the same underlying `sqlite3.OperationalError`) when it happens
+    inside a `Session` commit -- and turned into a 503 below instead of an
+    unhandled 500. Only that specific `SQLITE_BUSY` condition is treated as
+    the bounded/accepted race (adhd-dash-0yo, see `_is_sqlite_busy_error`);
+    any other `OperationalError` (e.g. "no such table", a corrupt/malformed
+    database) is not transient and propagates as a normal unhandled 500
+    instead of being mislabeled "busy, try again".
     """
     try:
         poll(request.app.state.config, request.app.state.db_engine)
     except (sqlite3.OperationalError, SQLAlchemyOperationalError) as exc:
-        if "database is locked" not in str(exc):
+        if not _is_sqlite_busy_error(exc):
             raise
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

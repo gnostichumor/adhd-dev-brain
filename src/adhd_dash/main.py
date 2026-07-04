@@ -3,11 +3,9 @@
 Boot with: uvicorn adhd_dash.main:app
 """
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -17,15 +15,6 @@ from adhd_dash.api.v1 import router as api_v1_router
 from adhd_dash.config import Config, load_config
 from adhd_dash.db import create_db_engine, init_db
 from adhd_dash.polling import poll
-
-logger = logging.getLogger(__name__)
-
-
-def _log_poll_job_error(event: JobExecutionEvent) -> None:
-    """APScheduler swallows a job's exception by default -- log it so a
-    scheduled poll failure (e.g. the busy-timeout exceeded, adhd-dash-s85)
-    is visible to an operator instead of silently disappearing."""
-    logger.error("Scheduled poll job failed: %s", event.exception, exc_info=event.exception)
 
 
 def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
@@ -38,9 +27,12 @@ def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
     deliberately avoids in tests -- see tests/test_projects_api.py -- to
     keep from touching the real default `state.db`).
 
-    Registers `_log_poll_job_error` on `EVENT_JOB_ERROR` so a scheduled
-    poll's failure is logged rather than silently swallowed by APScheduler's
-    default handling (adhd-dash-s85).
+    No custom `EVENT_JOB_ERROR` handling here (adhd-dash-s85 considered and
+    closed as invalid): APScheduler's own `executors/base.py::run_job`
+    already calls `logger.exception(...)` at ERROR level whenever a job
+    raises, before any `EVENT_JOB_ERROR` listener would even run -- a
+    scheduled poll failure is not silently swallowed by the library's
+    default handling, so no additional hook is needed.
     """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -59,7 +51,6 @@ def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
         # race rather than something actively prevented.
         max_instances=1,
     )
-    scheduler.add_listener(_log_poll_job_error, EVENT_JOB_ERROR)
     return scheduler
 
 

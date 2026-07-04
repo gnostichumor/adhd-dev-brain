@@ -1,9 +1,9 @@
-from datetime import timedelta
+import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import time_machine
-from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlmodel import Session, select
 
@@ -16,7 +16,7 @@ from adhd_dash.config import (
     StalenessConfig,
 )
 from adhd_dash.db import create_db_engine, init_db
-from adhd_dash.main import _log_poll_job_error, build_scheduler
+from adhd_dash.main import build_scheduler
 from adhd_dash.models import TrackedProject
 from adhd_dash.polling import poll
 from adhd_dash.projects import get_or_create_project as real_get_or_create_project
@@ -259,35 +259,35 @@ def test_build_scheduler_registers_poll_job_with_max_instances_one(tmp_path: Pat
     assert job.max_instances == 1
 
 
-def test_build_scheduler_registers_a_job_error_listener(tmp_path: Path) -> None:
-    """`build_scheduler` must register a listener for EVENT_JOB_ERROR so a
-    scheduled poll's failure isn't silently swallowed by APScheduler's
-    default handling (adhd-dash-s85)."""
+async def test_scheduled_poll_job_failure_is_logged_by_apscheduler_default_handling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """adhd-dash-s85: a scheduled poll job's failure is NOT silently
+    swallowed by APScheduler's default handling -- its executor already logs
+    any job exception at ERROR level. Locks that behavior against the
+    actual registered "poll" job, running for real via `scheduler.start()`
+    (rather than trusting it as an unverified assumption), so no extra
+    error-handling hook is needed here.
+    """
     config = _make_config(roots=[], interval_minutes=15)
     engine = create_db_engine(tmp_path / "state.db")
 
+    def failing_poll(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated busy-timeout exceeded")
+
+    monkeypatch.setattr("adhd_dash.main.poll", failing_poll)
     scheduler = build_scheduler(config, engine)
-
-    assert any(mask & EVENT_JOB_ERROR for _callback, mask in scheduler._listeners)
-
-
-def test_poll_job_error_listener_logs_the_exception(caplog: pytest.LogCaptureFixture) -> None:
-    """The registered listener itself must log the job's exception at ERROR
-    level (adhd-dash-s85), not just be present but inert."""
-    error = RuntimeError("simulated busy-timeout exceeded")
-    event = JobExecutionEvent(
-        code=EVENT_JOB_ERROR,
-        job_id="poll",
-        jobstore="default",
-        scheduled_run_time=None,
-        exception=error,
-        traceback=None,
-    )
+    scheduler.modify_job("poll", next_run_time=datetime.now(UTC))
 
     with caplog.at_level("ERROR"):
-        _log_poll_job_error(event)
+        scheduler.start()
+        for _ in range(100):
+            if any("raised an exception" in record.message for record in caplog.records):
+                break
+            await asyncio.sleep(0.05)
+        scheduler.shutdown(wait=False)
 
     assert any(
-        record.levelname == "ERROR" and "Scheduled poll job failed" in record.message
+        record.levelname == "ERROR" and "raised an exception" in record.message
         for record in caplog.records
     )

@@ -192,23 +192,48 @@ def test_refresh_triggers_poll_using_shared_db_engine(
     assert len(rows) == 1
 
 
-def test_refresh_returns_503_when_poll_raises_operational_error(
+def _sqlite_busy_error(message: str = "database is locked") -> sqlite3.OperationalError:
+    """A raw `sqlite3.OperationalError` with `sqlite_errorcode` populated the
+    way the real `sqlite3` driver populates it on an actual lock (verified
+    against a live lock-contention repro) -- constructing the exception
+    directly (as these tests must, to simulate the error without a real
+    concurrent writer) does not set that attribute on its own."""
+    exc = sqlite3.OperationalError(message)
+    exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    return exc
+
+
+def test_refresh_returns_503_when_poll_raises_wrapped_lock_error(
     app_state_for_refresh: None,
 ) -> None:
     """A concurrent scheduled poll can leave SQLite locked long enough that
     the busy-timeout (`adhd_dash.db.create_db_engine`) is exceeded anyway --
     in production this fires inside a `Session.commit()`, surfacing as
-    SQLAlchemy's *wrapped* `OperationalError` (whose string form still
-    contains the underlying driver's "database is locked" message), not a
-    raw `sqlite3.OperationalError` (adhd-dash-v28, adhd-dash-0yo).
+    SQLAlchemy's *wrapped* `OperationalError` (adhd-dash-v28, adhd-dash-0yo).
     `POST /api/v1/refresh` must turn that into a clean 503, not an
     unhandled 500."""
     with patch(
         "adhd_dash.api.v1.poll",
         side_effect=SQLAlchemyOperationalError(
-            "UPDATE tracked_project ...", {}, sqlite3.OperationalError("database is locked")
+            "UPDATE tracked_project ...", {}, _sqlite_busy_error()
         ),
     ):
+        response = client.post("/api/v1/refresh")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "busy"
+    assert "detail" in body
+
+
+def test_refresh_returns_503_when_poll_raises_raw_sqlite_lock_error(
+    app_state_for_refresh: None,
+) -> None:
+    """The lock can also surface as a raw `sqlite3.OperationalError`
+    directly (not wrapped by SQLAlchemy), per this route's own docstring --
+    `POST /api/v1/refresh` must handle that path too, not just the
+    SQLAlchemy-wrapped one (adhd-dash-0yo)."""
+    with patch("adhd_dash.api.v1.poll", side_effect=_sqlite_busy_error()):
         response = client.post("/api/v1/refresh")
 
     assert response.status_code == 503
@@ -220,10 +245,11 @@ def test_refresh_returns_503_when_poll_raises_operational_error(
 def test_refresh_propagates_non_lock_operational_error(
     app_state_for_refresh: None,
 ) -> None:
-    """Only "database is locked" is the bounded/accepted race (adhd-dash-0yo)
-    -- a different `OperationalError` (e.g. a missing table) is not
-    transient and must not be mislabeled "busy, try again"; it should
-    propagate as a genuine, unhandled 500 instead."""
+    """Only the SQLite busy-timeout condition (`SQLITE_BUSY`) is the
+    bounded/accepted race (adhd-dash-0yo) -- a different `OperationalError`
+    (e.g. a missing table) is not transient and must not be mislabeled
+    "busy, try again"; it should propagate as a genuine, unhandled 500
+    instead."""
     with patch(
         "adhd_dash.api.v1.poll",
         side_effect=sqlite3.OperationalError("no such table: tracked_project"),
