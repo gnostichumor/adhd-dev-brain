@@ -26,6 +26,13 @@ def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
     without spinning FastAPI's lifespan/TestClient (which this codebase
     deliberately avoids in tests -- see tests/test_projects_api.py -- to
     keep from touching the real default `state.db`).
+
+    No custom `EVENT_JOB_ERROR` handling here (adhd-dash-s85 considered and
+    closed as invalid): APScheduler's own `executors/base.py::run_job`
+    already calls `logger.exception(...)` at ERROR level whenever a job
+    raises, before any `EVENT_JOB_ERROR` listener would even run -- a
+    scheduled poll failure is not silently swallowed by the library's
+    default handling, so no additional hook is needed.
     """
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -69,7 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except ValidationError as exc:
         raise RuntimeError(f"config.yaml failed validation:\n{exc}") from exc
 
-    engine = create_db_engine()
+    engine = create_db_engine(busy_timeout_seconds=config.db.busy_timeout_seconds)
     init_db(engine)
 
     app.state.config = config

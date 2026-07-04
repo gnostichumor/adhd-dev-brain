@@ -52,6 +52,12 @@ class LoggingConfig(BaseModel):
     level: str
 
 
+class DbConfig(BaseModel):
+    """SQLite engine tuning for state.db."""
+
+    busy_timeout_seconds: int = Field(default=5, gt=0)
+
+
 class Config(BaseModel):
     """Root config.yaml schema."""
 
@@ -60,6 +66,7 @@ class Config(BaseModel):
     hosts: list[HostConfig] = Field(default_factory=list)
     github: GithubConfig
     logging: LoggingConfig
+    db: DbConfig = Field(default_factory=DbConfig)
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:

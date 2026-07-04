@@ -22,17 +22,18 @@ from adhd_dash import models as _models  # noqa: F401
 DEFAULT_DB_PATH = "state.db"
 
 
-def create_db_engine(path: str | Path = DEFAULT_DB_PATH) -> Engine:
+def create_db_engine(path: str | Path = DEFAULT_DB_PATH, busy_timeout_seconds: int = 5) -> Engine:
     """Build a SQLModel/SQLAlchemy engine bound to a single SQLite file.
 
     `check_same_thread=False` matches SQLModel's documented FastAPI pattern:
     the same engine is shared across request-handling threads/tasks, with
     per-request `Session`s providing isolation.
 
-    `timeout` (the Python `sqlite3` driver's busy-timeout, in seconds --
-    adhd-dash-v28) makes a writer that finds the DB locked (e.g. a scheduled
-    `poll()` pass and a manual `POST /api/v1/refresh` writing at the same
-    moment) wait and retry instead of immediately raising
+    `busy_timeout_seconds` (the Python `sqlite3` driver's busy-timeout --
+    adhd-dash-v28, sourced from `config.yaml`'s `db.busy_timeout_seconds`,
+    default 5, via the caller) makes a writer that finds the DB locked (e.g.
+    a scheduled `poll()` pass and a manual `POST /api/v1/refresh` writing at
+    the same moment) wait and retry instead of immediately raising
     `sqlite3.OperationalError: database is locked`. 5s is generous enough to
     ride out a same-machine poll/refresh overlap without a caller noticing a
     delay, while still failing fast (rather than hanging) for this
@@ -40,7 +41,7 @@ def create_db_engine(path: str | Path = DEFAULT_DB_PATH) -> Engine:
     """
     return create_engine(
         f"sqlite:///{path}",
-        connect_args={"check_same_thread": False, "timeout": 5},
+        connect_args={"check_same_thread": False, "timeout": busy_timeout_seconds},
     )
 
 
