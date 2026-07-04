@@ -133,14 +133,20 @@ def refresh(request: Request) -> dict[str, str] | JSONResponse:
     conflict can only cost the one project involved, not the whole pass. If
     the busy-timeout is exceeded anyway, SQLite raises "database is locked"
     -- surfaced here as `sqlite3.OperationalError` directly, or as
-    SQLAlchemy's wrapped `OperationalError` (whose `.orig` is the same
-    underlying `sqlite3.OperationalError`) when it happens inside a
+    SQLAlchemy's wrapped `OperationalError` (whose string form still
+    contains the original driver message) when it happens inside a
     `Session` commit -- and turned into a 503 below instead of an unhandled
-    500.
+    500. Only that specific "database is locked" condition is treated as
+    the bounded/accepted race (adhd-dash-0yo); any other `OperationalError`
+    (e.g. "no such table", a corrupt/malformed database) is not transient
+    and propagates as a normal unhandled 500 instead of being mislabeled
+    "busy, try again".
     """
     try:
         poll(request.app.state.config, request.app.state.db_engine)
-    except (sqlite3.OperationalError, SQLAlchemyOperationalError):
+    except (sqlite3.OperationalError, SQLAlchemyOperationalError) as exc:
+        if "database is locked" not in str(exc):
+            raise
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={

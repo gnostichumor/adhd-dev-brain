@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlmodel import Session, select
 
 from adhd_dash.config import (
@@ -196,12 +197,17 @@ def test_refresh_returns_503_when_poll_raises_operational_error(
 ) -> None:
     """A concurrent scheduled poll can leave SQLite locked long enough that
     the busy-timeout (`adhd_dash.db.create_db_engine`) is exceeded anyway --
-    `poll()` (or a `Session` commit inside it) then raises
-    `sqlite3.OperationalError` (adhd-dash-v28). `POST /api/v1/refresh` must
-    turn that into a clean 503, not an unhandled 500."""
+    in production this fires inside a `Session.commit()`, surfacing as
+    SQLAlchemy's *wrapped* `OperationalError` (whose string form still
+    contains the underlying driver's "database is locked" message), not a
+    raw `sqlite3.OperationalError` (adhd-dash-v28, adhd-dash-0yo).
+    `POST /api/v1/refresh` must turn that into a clean 503, not an
+    unhandled 500."""
     with patch(
         "adhd_dash.api.v1.poll",
-        side_effect=sqlite3.OperationalError("database is locked"),
+        side_effect=SQLAlchemyOperationalError(
+            "UPDATE tracked_project ...", {}, sqlite3.OperationalError("database is locked")
+        ),
     ):
         response = client.post("/api/v1/refresh")
 
@@ -209,6 +215,21 @@ def test_refresh_returns_503_when_poll_raises_operational_error(
     body = response.json()
     assert body["status"] == "busy"
     assert "detail" in body
+
+
+def test_refresh_propagates_non_lock_operational_error(
+    app_state_for_refresh: None,
+) -> None:
+    """Only "database is locked" is the bounded/accepted race (adhd-dash-0yo)
+    -- a different `OperationalError` (e.g. a missing table) is not
+    transient and must not be mislabeled "busy, try again"; it should
+    propagate as a genuine, unhandled 500 instead."""
+    with patch(
+        "adhd_dash.api.v1.poll",
+        side_effect=sqlite3.OperationalError("no such table: tracked_project"),
+    ):
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            client.post("/api/v1/refresh")
 
 
 def test_add_project_unreadable_path_returns_400_not_500(
