@@ -20,6 +20,17 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 
 
+class CannotEvaluateStalenessError(ValueError):
+    """Raised by `ProjectStatus.is_stale` when neither Beads nor GitHub
+    activity is available. architecture.md §5 requires this be flagged
+    explicitly rather than silently defaulted to fresh or stale -- a plain
+    `bool | None` return invites exactly that mistake (`if is_stale(...):`
+    silently treats `None` as falsy/"not stale"), so this case fails loudly
+    instead, matching this codebase's established "fail loudly" convention
+    (see `adhd_dash.config`'s module docstring).
+    """
+
+
 class ProjectStatus(BaseModel):
     """A tracked project's Beads- and GitHub-derived status, as of the last
     poll.
@@ -51,7 +62,7 @@ class ProjectStatus(BaseModel):
     total_issues: int
     closed_issues: int
 
-    def is_stale(self, *, threshold_days: int, now: datetime) -> bool | None:
+    def is_stale(self, *, threshold_days: int, now: datetime) -> bool:
         """Per-signal staleness (PRD R9, R17, R18; architecture.md §5).
 
         Evaluates `last_beads_activity_at` and `last_github_activity_at`
@@ -65,20 +76,27 @@ class ProjectStatus(BaseModel):
         which also gives R18's "no Beads init" case for free: staleness
         falls through to GitHub activity alone.
 
-        Returns `None` -- not `True` or `False` -- when NEITHER signal is
+        Raises `CannotEvaluateStalenessError` when NEITHER signal is
         available: architecture.md §5 is explicit that such a project can't
-        be evaluated for staleness at all, and must not be silently treated
-        as fresh or stale by a caller that forgets to check for this case.
+        be evaluated for staleness at all. This fails loudly rather than
+        returning `None`, so a caller can't accidentally write
+        `if project.is_stale(...):` and have the un-evaluable case silently
+        fall through as "not stale" (`None` is falsy) -- exactly the silent
+        default §5 warns against.
 
-        `threshold_days` and `now` are explicit parameters rather than
-        implicit config/`datetime.now()` reads so this stays a pure,
-        deterministic function of its inputs -- callers own reading
-        `config.yaml`'s `staleness.default_threshold_days` and the current
-        time (see `time_machine`'s use elsewhere in this codebase's tests
-        for why an implicit "now" is avoided).
+        `threshold_days` and `now` (which must be timezone-aware, like
+        `last_beads_activity_at`/`last_github_activity_at` above -- a naive
+        `now` raises `TypeError` when compared against them) are explicit
+        parameters rather than implicit config/`datetime.now()` reads so
+        this stays a pure, deterministic function of its inputs -- callers
+        own reading `config.yaml`'s `staleness.default_threshold_days` and
+        the current time (see `time_machine`'s use elsewhere in this
+        codebase's tests for why an implicit "now" is avoided).
         """
         if self.last_beads_activity_at is None and self.last_github_activity_at is None:
-            return None
+            raise CannotEvaluateStalenessError(
+                "neither last_beads_activity_at nor last_github_activity_at is available"
+            )
 
         threshold = timedelta(days=threshold_days)
         beads_stale = (

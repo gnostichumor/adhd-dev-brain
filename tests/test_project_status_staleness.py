@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from adhd_dash.adapters.models import ProjectStatus
+from adhd_dash.adapters.models import CannotEvaluateStalenessError, ProjectStatus
 
 NOW = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC)
 THRESHOLD_DAYS = 14
@@ -27,17 +27,20 @@ def _status(
     [
         pytest.param(FRESH, FRESH, False, id="both_fresh"),
         pytest.param(STALE, STALE, True, id="both_stale"),
+        # The two cases a max()-based implementation would get wrong (R17):
+        # the freshest signal must NOT mask staleness on the other side.
+        # Together they also prove R9's no-ordering-bias claim -- swapping
+        # which signal is stale doesn't change the outcome.
         pytest.param(STALE, FRESH, True, id="beads_stale_github_fresh"),
         pytest.param(FRESH, STALE, True, id="beads_fresh_github_stale"),
         pytest.param(FRESH, None, False, id="beads_only_fresh"),
         pytest.param(STALE, None, True, id="beads_only_stale"),
         pytest.param(None, FRESH, False, id="github_only_fresh"),
         pytest.param(None, STALE, True, id="github_only_stale"),
-        pytest.param(None, None, None, id="neither_available"),
     ],
 )
 def test_is_stale_combinations(
-    beads: datetime | None, github: datetime | None, expected: bool | None
+    beads: datetime | None, github: datetime | None, expected: bool
 ) -> None:
     """PRD R9 (equal-weight), R17 (either-signal, not max()), R18 (GitHub
     alone when no Beads init) -- the full combination table named in
@@ -47,25 +50,15 @@ def test_is_stale_combinations(
     assert status.is_stale(threshold_days=THRESHOLD_DAYS, now=NOW) is expected
 
 
-def test_is_stale_beads_stale_github_fresh_would_be_wrong_under_max() -> None:
-    """The exact case a max()-based implementation gets wrong (R17): the
-    freshest signal must NOT mask staleness on the other side."""
-    status = _status(STALE, FRESH)
+def test_is_stale_raises_when_neither_signal_available() -> None:
+    """architecture.md §5: a project with neither signal available can't be
+    evaluated for staleness at all -- this must fail loudly (not return
+    `None`, which a careless `if is_stale(...):` would silently treat as
+    "not stale")."""
+    status = _status(None, None)
 
-    assert status.is_stale(threshold_days=THRESHOLD_DAYS, now=NOW) is True
-    # A max()-based rule would compare max(beads_age, github_age) = github_age
-    # (fresh) against the threshold and wrongly call this "not stale".
-    newest_activity = max(STALE, FRESH)
-    assert (NOW - newest_activity) < timedelta(days=THRESHOLD_DAYS)
-
-
-def test_is_stale_gives_symmetric_results_regardless_of_which_signal_is_stale() -> None:
-    """R9: no implicit weighting/ordering bias between the two signals --
-    swapping which signal is stale must not change the outcome."""
-    beads_stale_result = _status(STALE, FRESH).is_stale(threshold_days=THRESHOLD_DAYS, now=NOW)
-    github_stale_result = _status(FRESH, STALE).is_stale(threshold_days=THRESHOLD_DAYS, now=NOW)
-
-    assert beads_stale_result == github_stale_result is True
+    with pytest.raises(CannotEvaluateStalenessError):
+        status.is_stale(threshold_days=THRESHOLD_DAYS, now=NOW)
 
 
 def test_is_stale_boundary_exactly_at_threshold_is_not_stale() -> None:
