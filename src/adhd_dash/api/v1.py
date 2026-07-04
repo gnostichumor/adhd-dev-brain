@@ -1,26 +1,33 @@
 """v1 API routes.
 
-Only a health check, the manual add-project route, and a manual refresh
-trigger (adhd-dash-c6f.4) exist here by design -- Beads adapters, the GitHub
-client, and staleness evaluation each own their own routes and land as those
-subsystems are implemented, not bundled in here ahead of time.
+A health check, the manual add-project route, a manual refresh trigger
+(adhd-dash-c6f.4), and a per-project staleness listing (adhd-dash-oui.3)
+exist here. Beads-status ingestion for a project WITH `.beads/` present
+does not land here yet -- see `list_projects`'s docstring.
 """
 
+import logging
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
-from sqlmodel import Session
+from sqlmodel import Session, select
 
+from adhd_dash.adapters.models import CannotEvaluateStalenessError
 from adhd_dash.db import get_db_session
 from adhd_dash.discovery import detect_project
+from adhd_dash.github_client import GithubClient
 from adhd_dash.models import TrackedProject
 from adhd_dash.polling import poll
 from adhd_dash.projects import get_or_create_project
+from adhd_dash.staleness import BeadsNotSupportedError, evaluate_project
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -170,3 +177,138 @@ def refresh(request: Request) -> dict[str, str] | JSONResponse:
             },
         )
     return {"status": "polled"}
+
+
+class ProjectStalenessResponse(BaseModel):
+    """Per-project staleness view for `GET /api/v1/projects` (PRD R18,
+    adhd-dash-oui.3).
+
+    `evaluation_status` distinguishes four outcomes explicitly so a
+    consumer never has to guess at what a bare `None` means -- **branch on
+    `evaluation_status`, never on `is_stale`'s truthiness**: `is_stale` is
+    `None` whenever `evaluation_status != "evaluated"`, and a project that
+    couldn't be evaluated must not be silently read as "not stale" (`None`
+    is falsy) -- exactly the failure mode `CannotEvaluateStalenessError`
+    exists to prevent internally; this field is what prevents it here too,
+    since a JSON response can't raise.
+
+    - `"evaluated"`: a real evaluation ran. In this issue, `percent_complete`
+      and `last_beads_activity_at` are always `None` here -- only
+      `last_github_activity_at`/`is_stale` are meaningfully populated until
+      Beads adapter selection (adhd-dash-fqd) is built.
+    - `"beads_not_supported"`: `project.path` has a `.beads/` directory but
+      no adapter is wired to a CLI-variant selection yet (adhd-dash-fqd).
+    - `"cannot_evaluate"`: no derivable GitHub owner/repo is available for
+      this project (no git remote, or not a GitHub remote), and it has no
+      `.beads/` either -- neither signal exists.
+    - `"evaluation_error"`: an unexpected error occurred evaluating this one
+      project (e.g. a malformed GitHub API response) -- logged server-side
+      for an operator to investigate; isolated to this project so it
+      doesn't take down the rest of the listing.
+    """
+
+    id: int
+    host: str
+    path: str
+    evaluation_status: Literal[
+        "evaluated", "beads_not_supported", "cannot_evaluate", "evaluation_error"
+    ]
+    percent_complete: float | None
+    last_beads_activity_at: datetime | None
+    last_github_activity_at: datetime | None
+    is_stale: bool | None
+
+
+def _unevaluated_response(
+    project: TrackedProject,
+    evaluation_status: Literal["beads_not_supported", "cannot_evaluate", "evaluation_error"],
+) -> ProjectStalenessResponse:
+    assert project.id is not None, "a persisted TrackedProject row always has an id"
+    return ProjectStalenessResponse(
+        id=project.id,
+        host=project.host,
+        path=project.path,
+        evaluation_status=evaluation_status,
+        percent_complete=None,
+        last_beads_activity_at=None,
+        last_github_activity_at=None,
+        is_stale=None,
+    )
+
+
+@router.get("/projects", response_model=list[ProjectStalenessResponse])
+async def list_projects(
+    request: Request,
+    session: Session = Depends(get_db_session),
+) -> list[ProjectStalenessResponse]:
+    """List every tracked project with its current staleness evaluation
+    (PRD R18, adhd-dash-oui.3).
+
+    Always returns HTTP 200 with one entry per `TrackedProject` row --
+    never a per-project 4xx/5xx, never a silently-dropped row. A project
+    that can't be fully evaluated (has `.beads/` but no adapter wired yet;
+    has neither signal available; or hit an unexpected error) is still
+    returned, with `evaluation_status` explicitly flagging why -- raising
+    would take the whole listing down for one problem project; omitting it
+    would silently hide exactly the information staleness-tracking exists
+    to surface. See `ProjectStalenessResponse`'s docstring for the four
+    possible values.
+
+    The final `except Exception` is deliberate, not a blanket catch-all
+    layered on carelessly: `evaluate_project`'s callees (in particular
+    `GithubClient.get_latest_commit_activity`, whose own docstring calls a
+    malformed-but-200 API response "a genuine bug surface" it deliberately
+    lets raise) can fail in ways `BeadsNotSupportedError`/
+    `CannotEvaluateStalenessError` don't cover. This route's own contract
+    (every project gets a row, one bad project never 500s the whole
+    listing) requires catching those too -- logged loudly server-side via
+    `logger.exception`, not silently swallowed, so an operator still sees it.
+
+    Archived/snoozed filtering is explicitly out of scope for this route in
+    this issue -- it returns every `TrackedProject` row unconditionally.
+
+    Uses `request.app.state.github_client` (built once in `main.py`'s
+    `lifespan`) rather than constructing a `GithubClient` per request -- a
+    fresh client per call would discard its internal per-`(owner, repo)`
+    TTL cache on every request, defeating `check_ttl_minutes`.
+    """
+    projects = session.exec(select(TrackedProject)).all()
+    github_client: GithubClient = request.app.state.github_client
+    threshold_days: int = request.app.state.config.staleness.default_threshold_days
+    now = datetime.now(UTC)
+
+    results: list[ProjectStalenessResponse] = []
+    for project in projects:
+        try:
+            evaluation = await evaluate_project(
+                project, github_client, threshold_days=threshold_days, now=now
+            )
+        except BeadsNotSupportedError:
+            results.append(_unevaluated_response(project, "beads_not_supported"))
+            continue
+        except CannotEvaluateStalenessError:
+            results.append(_unevaluated_response(project, "cannot_evaluate"))
+            continue
+        except Exception:
+            logger.exception(
+                "Unexpected error evaluating staleness for project %s (%s)",
+                project.id,
+                project.path,
+            )
+            results.append(_unevaluated_response(project, "evaluation_error"))
+            continue
+
+        assert project.id is not None, "a persisted TrackedProject row always has an id"
+        results.append(
+            ProjectStalenessResponse(
+                id=project.id,
+                host=project.host,
+                path=project.path,
+                evaluation_status="evaluated",
+                percent_complete=evaluation.percent_complete,
+                last_beads_activity_at=evaluation.last_beads_activity_at,
+                last_github_activity_at=evaluation.last_github_activity_at,
+                is_stale=evaluation.is_stale,
+            )
+        )
+    return results

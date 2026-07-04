@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 class StalenessConfig(BaseModel):
     """How long a project may go quiet before it's flagged stale."""
 
-    default_threshold_days: int
+    default_threshold_days: int = Field(gt=0)
 
 
 class PollingConfig(BaseModel):
