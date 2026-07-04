@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from adhd_dash.config import (
     Config,
+    DbConfig,
     GithubConfig,
     LoggingConfig,
     PollingConfig,
@@ -204,3 +205,14 @@ db:
     config = load_config(config_path)
 
     assert config.db.busy_timeout_seconds == 10
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, -5])
+def test_db_config_rejects_non_positive_busy_timeout(bad_value: int) -> None:
+    """A `busy_timeout_seconds` of 0 disables SQLite's busy-handler entirely
+    (confirmed via a live lock-contention repro: `timeout=0` raises
+    "database is locked" immediately instead of waiting), silently
+    defeating the point of this config -- must be rejected at validation
+    time, not accepted and only fail confusingly at runtime."""
+    with pytest.raises(ValidationError):
+        DbConfig(busy_timeout_seconds=bad_value)
