@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except ValidationError as exc:
         raise RuntimeError(f"config.yaml failed validation:\n{exc}") from exc
 
-    engine = create_db_engine()
+    engine = create_db_engine(busy_timeout_seconds=config.db.busy_timeout_seconds)
     init_db(engine)
 
     app.state.config = config

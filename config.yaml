@@ -8,3 +8,5 @@ github:
   token: ""
 logging:
   level: INFO
+db:
+  busy_timeout_seconds: 5

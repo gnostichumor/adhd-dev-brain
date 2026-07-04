@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from adhd_dash.config import load_config
+from adhd_dash.config import (
+    Config,
+    GithubConfig,
+    LoggingConfig,
+    PollingConfig,
+    StalenessConfig,
+    load_config,
+)
 
 VALID_CONFIG = """
 staleness:
@@ -166,3 +173,34 @@ def test_shipped_config_yaml_is_valid() -> None:
 
     assert config.hosts == []
     assert config.github.token == ""
+    assert config.db.busy_timeout_seconds == 5
+
+
+def test_db_config_defaults_to_five_second_busy_timeout() -> None:
+    """`Config(...)` constructed without a `db=` field (as several tests do
+    directly) must still default `busy_timeout_seconds` to 5, matching the
+    value that was previously hardcoded in `db.create_db_engine`
+    (adhd-dash-b4t)."""
+    config_path_free = Config(
+        staleness=StalenessConfig(default_threshold_days=14),
+        polling=PollingConfig(interval_minutes=60),
+        github=GithubConfig(check_ttl_minutes=60, token=""),
+        logging=LoggingConfig(level="INFO"),
+    )
+
+    assert config_path_free.db.busy_timeout_seconds == 5
+
+
+def test_db_config_custom_value_round_trips_through_config_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        VALID_CONFIG
+        + """
+db:
+  busy_timeout_seconds: 10
+"""
+    )
+
+    config = load_config(config_path)
+
+    assert config.db.busy_timeout_seconds == 10
