@@ -146,6 +146,7 @@ class BdAdapter:
         return ProjectStatus(
             percent_complete=percent_complete,
             last_beads_activity_at=last_beads_activity_at,
+            last_github_activity_at=None,
             total_issues=total_issues,
             closed_issues=closed_issues,
         )
