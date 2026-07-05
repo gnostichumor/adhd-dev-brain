@@ -216,3 +216,16 @@ def test_db_config_rejects_non_positive_busy_timeout(bad_value: int) -> None:
     time, not accepted and only fail confusingly at runtime."""
     with pytest.raises(ValidationError):
         DbConfig(busy_timeout_seconds=bad_value)
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, -14])
+def test_staleness_config_rejects_non_positive_threshold(bad_value: int) -> None:
+    """A `default_threshold_days` of 0 or negative makes `ProjectStatus.is_stale`
+    (adhd-dash-oui.1/R9, adhd-dash-oui.2/R17) flag virtually every project as
+    stale regardless of actual activity (confirmed empirically: threshold_days=0
+    against a 1-second-old timestamp already returns `is_stale=True`) --
+    adhd-dash-oui.3 is what first makes this field production-reachable (via
+    `GET /api/v1/projects`), so it must be rejected at validation time, not
+    accepted and only fail confusingly at runtime."""
+    with pytest.raises(ValidationError):
+        StalenessConfig(default_threshold_days=bad_value)

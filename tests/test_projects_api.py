@@ -1,9 +1,13 @@
 import sqlite3
-from collections.abc import Generator
+import subprocess
+from collections.abc import AsyncGenerator, Callable, Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
+import time_machine
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
@@ -17,6 +21,7 @@ from adhd_dash.config import (
     StalenessConfig,
 )
 from adhd_dash.db import create_db_engine, get_db_session, init_db
+from adhd_dash.github_client import GithubClient
 from adhd_dash.main import app
 from adhd_dash.models import TrackedProject
 
@@ -79,6 +84,59 @@ def _make_project_dir(tmp_path: Path, name: str = "my-project", marker: str = ".
     project = tmp_path / name
     (project / marker).mkdir(parents=True)
     return project
+
+
+def _make_git_project_dir(
+    tmp_path: Path, name: str = "git-project", remote_url: str | None = None
+) -> Path:
+    project = tmp_path / name
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    if remote_url is not None:
+        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=project, check=True)
+    return project
+
+
+@pytest.fixture
+async def app_state_for_project_listing(
+    override_db_session: Engine,
+) -> AsyncGenerator[Callable[[httpx.MockTransport], None], None]:
+    """Set `app.state.config`/`app.state.db_engine` for `GET /api/v1/projects`,
+    mirroring `app_state_for_refresh`. That route additionally reads
+    `request.app.state.github_client` directly (again mirroring `main.py`'s
+    `lifespan`, which plain `TestClient(app)` never runs), so this yields a
+    setter each test calls with its own `httpx.MockTransport` to build and
+    assign it -- letting each test control exactly what the mocked GitHub
+    API returns without touching real network access.
+
+    An async fixture (not a plain sync generator) specifically so teardown
+    can `await` the constructed `GithubClient.aclose()` -- mirroring
+    `main.py`'s own `lifespan` shutdown -- rather than leaking its
+    underlying `httpx.AsyncClient` per test.
+    """
+    config = Config(
+        staleness=StalenessConfig(default_threshold_days=14),
+        polling=PollingConfig(interval_minutes=60),
+        hosts=[],
+        github=GithubConfig(check_ttl_minutes=60, token=""),
+        logging=LoggingConfig(level="INFO"),
+    )
+    app.state.config = config
+    app.state.db_engine = override_db_session
+
+    def _set_github_transport(transport: httpx.MockTransport) -> None:
+        app.state.github_client = GithubClient(
+            token="",
+            check_ttl_minutes=60,
+            client=httpx.AsyncClient(transport=transport, base_url="https://api.github.com"),
+        )
+
+    yield _set_github_transport
+
+    del app.state.config
+    del app.state.db_engine
+    if hasattr(app.state, "github_client"):
+        await app.state.github_client.aclose()
+        del app.state.github_client
 
 
 def test_add_valid_project_returns_201_and_persists(tmp_path: Path) -> None:
@@ -281,3 +339,141 @@ def test_add_project_unreadable_path_returns_400_not_500(
 
     assert response.status_code == 400
     assert "detail" in response.json()
+
+
+def test_list_projects_no_beads_with_github_remote_evaluated_and_percent_complete_is_null(
+    tmp_path: Path, app_state_for_project_listing: Callable[[httpx.MockTransport], None]
+) -> None:
+    """The named PRD-R18 acceptance scenario: a real git checkout with a
+    real github.com `origin` remote, no `.beads/`, evaluates using GitHub
+    commit activity alone -- `percent_complete` stays `None` (no Beads
+    adapter is invoked in this issue) while `last_github_activity_at`/
+    `is_stale` are genuinely populated."""
+    project_dir = _make_git_project_dir(
+        tmp_path, remote_url="https://github.com/octocat/hello-world.git"
+    )
+    add_response = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir)})
+    assert add_response.status_code == 201
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=[{"commit": {"committer": {"date": "2026-07-01T12:00:00Z"}}}]
+        )
+
+    app_state_for_project_listing(httpx.MockTransport(handler))
+
+    with time_machine.travel(datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC), tick=False):
+        response = client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    result = body[0]
+    assert result["evaluation_status"] == "evaluated"
+    assert result["percent_complete"] is None
+    assert result["last_github_activity_at"] is not None
+    assert result["is_stale"] is False
+
+
+def test_list_projects_has_beads_returns_beads_not_supported(
+    tmp_path: Path, app_state_for_project_listing: Callable[[httpx.MockTransport], None]
+) -> None:
+    project_dir = _make_project_dir(tmp_path)
+    add_response = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir)})
+    assert add_response.status_code == 201
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should never hit the transport when .beads is present")
+
+    app_state_for_project_listing(httpx.MockTransport(handler))
+
+    response = client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    result = body[0]
+    assert result["evaluation_status"] == "beads_not_supported"
+    assert result["percent_complete"] is None
+    assert result["is_stale"] is None
+
+
+def test_list_projects_no_beads_no_github_remote_returns_cannot_evaluate(
+    tmp_path: Path, app_state_for_project_listing: Callable[[httpx.MockTransport], None]
+) -> None:
+    project_dir = _make_git_project_dir(tmp_path)
+    add_response = client.post("/api/v1/projects", json={"host": "local", "path": str(project_dir)})
+    assert add_response.status_code == 201
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should never hit the transport with no derivable owner/repo")
+
+    app_state_for_project_listing(httpx.MockTransport(handler))
+
+    response = client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    result = body[0]
+    assert result["evaluation_status"] == "cannot_evaluate"
+    assert result["is_stale"] is None
+
+
+def test_list_projects_empty_when_no_tracked_projects(
+    app_state_for_project_listing: Callable[[httpx.MockTransport], None],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should never hit the transport with no tracked projects")
+
+    app_state_for_project_listing(httpx.MockTransport(handler))
+
+    response = client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_projects_isolates_one_projects_evaluation_error_from_the_rest(
+    tmp_path: Path, app_state_for_project_listing: Callable[[httpx.MockTransport], None]
+) -> None:
+    """A malformed-but-200 GitHub API response for ONE project (e.g. a
+    response missing the expected commit/date shape) must not 500 the
+    whole listing -- it's isolated to that project's row as
+    `evaluation_status="evaluation_error"`, while an unrelated project in
+    the same request still evaluates normally."""
+    broken_project_dir = _make_git_project_dir(
+        tmp_path, name="broken-project", remote_url="https://github.com/octocat/hello-world.git"
+    )
+    add_broken = client.post(
+        "/api/v1/projects", json={"host": "local", "path": str(broken_project_dir)}
+    )
+    assert add_broken.status_code == 201
+
+    fine_project_dir = _make_project_dir(tmp_path, name="fine-project")
+    add_fine = client.post(
+        "/api/v1/projects", json={"host": "local", "path": str(fine_project_dir)}
+    )
+    assert add_fine.status_code == 201
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A 200 with a body missing the expected "commit"/"date" shape --
+        # github_client.py's own docstring calls this "a genuine bug
+        # surface" it deliberately lets raise (here: KeyError).
+        return httpx.Response(200, json=[{"unexpected": "shape"}])
+
+    app_state_for_project_listing(httpx.MockTransport(handler))
+
+    response = client.get("/api/v1/projects")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+
+    by_path = {result["path"]: result for result in body}
+    broken_result = by_path[str(broken_project_dir.resolve())]
+    fine_result = by_path[str(fine_project_dir.resolve())]
+
+    assert broken_result["evaluation_status"] == "evaluation_error"
+    assert broken_result["is_stale"] is None
+    assert fine_result["evaluation_status"] == "beads_not_supported"

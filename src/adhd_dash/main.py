@@ -14,7 +14,20 @@ from sqlalchemy import Engine
 from adhd_dash.api.v1 import router as api_v1_router
 from adhd_dash.config import Config, load_config
 from adhd_dash.db import create_db_engine, init_db
+from adhd_dash.github_client import GithubClient
 from adhd_dash.polling import poll
+
+
+def build_github_client(config: Config) -> GithubClient:
+    """Build a `GithubClient` from `config.github` (PRD R18, adhd-dash-oui.3).
+
+    Kept separate from `lifespan`, mirroring `build_scheduler`, so it's
+    unit-testable without spinning FastAPI's lifespan/TestClient.
+    """
+    return GithubClient(
+        token=config.github.token,
+        check_ttl_minutes=config.github.check_ttl_minutes,
+    )
 
 
 def build_scheduler(config: Config, engine: Engine) -> AsyncIOScheduler:
@@ -82,13 +95,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.config = config
     app.state.db_engine = engine
 
+    github_client = build_github_client(config)
+    app.state.github_client = github_client
+
     scheduler = build_scheduler(config, engine)
     scheduler.start()
     app.state.scheduler = scheduler
 
     yield
 
-    scheduler.shutdown()
+    try:
+        scheduler.shutdown()
+    finally:
+        await github_client.aclose()
 
 
 def create_app() -> FastAPI:
